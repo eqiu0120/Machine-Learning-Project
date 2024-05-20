@@ -1,0 +1,2138 @@
+---
+title: "Final Report"
+author: Raelynn Hu (190164760), Luyu Yang (190232060), Rei Kondo (203127050), Eric
+  Qiu (203023070)
+date: "2024-03-31"
+output:
+  html_document:
+    df_print: paged
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+## Setup
+
+**Purpose**: Prepare the R environment for data analysis by loading
+necessary libraries. These libraries facilitate data manipulation,
+cleaning, visualization, and analysis.
+
+```{r setup, include=FALSE}
+# Set global options for R Markdown chunks
+knitr::opts_chunk$set(echo = TRUE)
+# Load libraries essential for data manipulation, cleaning, visualization, and analysis
+library(dplyr)         # Load dplyr for data manipulation
+library(janitor)       # Load janitor for data cleaning
+library(ggplot2)       # Load ggplot2 for data visualization
+library(car)           # Load car for diagnostic tests and plots
+library(lmtest)        # Load lmtest for linear model tests
+library(corrplot)      # Load corrplot for visualizing correlations
+library(Metrics)       # Load Metrics for calculating model performance metrics
+library(tidyverse)     # Load tidyverse, a collection of packages for data science
+library(broom)         # Loads broom to tidy the output of statistical models
+```
+
+## Load Data
+
+**Objective**: Import and initially explore the Steam dataset. This step
+involves reading the dataset from a CSV file, examining its structure,
+and summarizing its content to gain a preliminary understanding.
+
+```{r}
+# Import Steam data from a CSV file
+SteamData <- read.csv("steam.csv")
+# Overview of the SteamData's structure
+str(SteamData)
+```
+
+```{r}
+# Import Tag data from a CSV file
+TagData <- read.csv("steamspy_tag_data.csv")
+# Overview of the TagData's structure
+str(TagData)
+```
+
+## General Data Pre-processing
+
+#### Normalized Data
+
+**Data Normalization**: To scale numeric features to a uniform range
+(0-1), ensuring no single feature disproportionately influences the
+analysis due to its scale.Normalization makes the data more homogeneous,
+facilitating more accurate comparisons and analyses. It's particularly
+important when dealing with variables of different units or scales and
+helps improve the performance of many statistical models.
+
+```{r}
+# Function to normalize a column to the range 0-1
+normalize_column <- function(x) {
+  return((x - min(x, na.rm = TRUE)) / (max(x, na.rm = TRUE) - min(x, na.rm = TRUE)))
+}
+# Apply the normalization function to each numeric column excluding 'appid'
+normalizedTagData <- TagData
+normalizedTagData[-which(names(TagData) == "appid")] <- lapply(TagData[-which(names(TagData) == "appid")], function(x) {
+  if(is.numeric(x)) normalize_column(x) else x
+})
+```
+
+#### Data Transformation
+
+**Splitting 'owners' Range**: The 'owners' column is processed to create
+a more precise representation of ownership. This involves splitting the
+range into minimum and maximum values, converting these to numeric
+types, calculating their midpoint, and updating the 'owners' column with
+these midpoints.
+
+```{r}
+# Split the 'owners' column into two columns ('min_owners' and 'max_owners')
+owners_split <- strsplit(SteamData$owners, "-")
+
+# Convert to numeric and calculate midpoints
+owners_midpoint <- sapply(owners_split, function(x) {
+  min_owners <- as.numeric(x[1])
+  max_owners <- as.numeric(x[2])
+  # Calculate midpoint of ownership range
+  return((min_owners + max_owners) / 2)
+})
+
+# Replace 'owners' with its midpoint
+SteamData$owners <- owners_midpoint
+```
+
+**Positive Rating Percentage**: The code calculates the percentage of positive 
+ratings for each item in a Steam dataset and adds this as a new column, 
+`pos_rate`, facilitating analysis of user satisfaction and item popularity.
+
+```{r}
+# Dividing the number of positive ratings by the total number of ratings yields the fraction of ratings that are positive.
+SteamData$pos_rate <- SteamData$positive_ratings / (SteamData$positive_ratings + SteamData$negative_ratings)
+```
+
+**One-hot Encoding**: Categorical variables like categories, genres, and
+platforms are transformed from semicolon-separated strings into separate
+binary columns for each category, genre, and platform. This
+transformation makes it easier to analyze the impact of these variables
+on the target variable.
+
+```{r}
+# One-hot encode categorical variables: categories, genres, platforms
+SteamData$categories <- str_split(SteamData$categories, ";") # Split categories into a list
+SteamData$genres <- str_split(SteamData$genres, ";") # Split genres into a list
+SteamData$platforms <- str_split(SteamData$platforms, ";") # Split platforms into a list
+
+# Process of unnesting and one-hot encoding is similar for categories, genres, and platforms:
+# - Unnesting converts a list column into a normal column, expanding the data frame.
+# - One-hot encoding transforms categorical variables into a format that can be provided to ML algorithms.
+
+# Unnest categories
+SteamData_categories_long <- SteamData %>% 
+  mutate(row = row_number()) %>%
+  select(row, categories) %>%
+  unnest(categories)
+
+# Unnest genres
+SteamData_genres_long <- SteamData %>% 
+  mutate(row = row_number()) %>%
+  select(row, genres) %>%
+  unnest(genres)
+
+# Unnest platforms
+SteamData_platforms_long <- SteamData %>% 
+  mutate(row = row_number()) %>%
+  select(row, platforms) %>%
+  unnest(platforms)
+
+# One-hot encode categories
+SteamData_categories_binary <- SteamData_categories_long %>% 
+  mutate(value = 1) %>%
+  pivot_wider(names_from = categories, values_from = value, values_fill = list(value = 0))
+
+# One-hot encode genres
+SteamData_genres_binary <- SteamData_genres_long %>% 
+  mutate(value = 1) %>%
+  pivot_wider(names_from = genres, values_from = value, values_fill = list(value = 0))
+
+# One-hot encode platforms
+SteamData_platforms_binary <- SteamData_platforms_long %>% 
+  mutate(value = 1) %>%
+  pivot_wider(names_from = platforms, values_from = value, values_fill = list(value = 0))
+
+# Remove the original categories, genres, and platforms columns and add a row identifier
+SteamData_processed <- SteamData %>%
+  select(-categories, -genres, -platforms) %>%
+  mutate(row = row_number())
+
+# Merge the one-hot encoded categories, genres, and platforms back
+SteamData_final <- SteamData_processed %>% 
+  left_join(SteamData_categories_binary, by = "row") %>%
+  left_join(SteamData_genres_binary, by = "row") %>%
+  left_join(SteamData_platforms_binary, by = "row")
+
+# Remove the 'row' column after merging
+SteamData_final <- SteamData_final %>% select(-row)
+```
+
+#### Data Cleaning
+
+**Purpose**: Removing columns not pertinent to the analysis (like name, 
+release_date, steamspy_tags, developer, publisher, and median_playtime). 
+This step's purpose is to streamline the dataset, focusing analysis on 
+variables that directly contribute to understanding user engagement and 
+game performance.
+
+```{r}
+# Remove non-relevant columns to focus on variables of interest
+SteamData_final <- select(SteamData_final, -c(name, release_date, steamspy_tags, developer, publisher, median_playtime))
+```
+
+## Analyzing Average Playtime
+
+**Purpose**: preparing the average_playtime variable for linear regression 
+analysis. The goal is to identify and mitigate the influence of outliers which
+could potentially skew the results of the regression model. By generating 
+summary statistics and visualizations, we can understand the distribution of 
+average_playtime and make informed decisions on data transformation, such as 
+log transformation, to normalize the data distribution. This preprocessing is a 
+critical step to ensure the validity of any inferences drawn from the linear 
+regression analysis that follows.
+
+```{r}
+# Generate summary statistics for average_playtime
+summary(SteamData_final$average_playtime)
+# Create a scatter plot to visualize the distribution of average_playtime
+plot(SteamData_final$average_playtime, main = "Scatter plot of average playtime", ylab = "Average playtime")
+```
+
+The summary reveals a skewed distribution, with a significant number of zeros 
+and outliers, indicating varied game engagement levels. 
+It seems like there are some outliers. 3rd quantile is 0, which
+indicates that majority of the playtime in the data set.
+
+**Purpose**: This prints the total number of observations, the number of 
+outliers (defined as average_playtime greater than 25,000), and the number of 
+entries with zero playtime, providing insight into the dataset's composition 
+and guiding further data cleaning actions.
+
+```{r}
+# Identify and count outliers and zero playtime entries
+print(paste("We have", nrow(SteamData_final), "observations:",
+  nrow(SteamData_final[which(SteamData_final$average_playtime > 25000),]), 
+  "outliers and", 
+  nrow(SteamData_final[which(SteamData_final$average_playtime == 0),]), 
+  "with zero average playtime."))
+```
+
+#### Identify Non-Zero Playtime
+
+**Purpose**: To address the skew, the analysis narrows down to entries with 
+non-zero playtime, ensuring the focus remains on actively engaged games. This 
+subset creation is crucial for meaningful analysis, avoiding distortion from 
+games with no engagement.
+```{r}
+# Filter the dataset to include only entries with nonzero average playtime
+nonzeroPlaytime <- subset(SteamData_final, average_playtime > 0 & !is.na(average_playtime))
+```
+
+#### Outlier Removal For Non-Zaro Average Playtime
+
+**Outliers**: Outliers in non-zero average playtime are larger than
+25000 to ensure the analysis is not skewed by extreme values.
+
+**Purpose**: The code further refines the dataset by removing extreme outliers 
+(playtime above 25,000), which could skew results. This step ensures a more 
+normalized dataset, suitable for analyzing typical user engagement patterns 
+without being overshadowed by extreme cases.
+
+```{r}
+# Remove outliers from the non-zero average playtime dataset to avoid skewing the analysis
+# Aiming to further refine the dataset for a balanced analysis.
+nonzeroPlaytime <- subset(nonzeroPlaytime, average_playtime <= 25000)
+# Explore the distribution of cleaned average playtime through various plots
+str(nonzeroPlaytime$average_playtime)
+summary(nonzeroPlaytime$average_playtime)
+par(mfrow = c(1,2))
+# Scatter Plot
+plot(nonzeroPlaytime$average_playtime, main = "Scatterplot", ylab = "Average playtime")
+# Histogram
+hist(nonzeroPlaytime$average_playtime, main = "Histogram", xlab = "Average playtime", breaks = 100)
+# Density Plot
+plot(density(nonzeroPlaytime$average_playtime), main = "Density Plot", xlab = "Average playtime" )
+# ECDF Plot
+plot(ecdf(nonzeroPlaytime$average_playtime), main = "ECDF Plot", xlab = "Average playtime" )
+```
+**Scatterplot**: This graph shows individual data points along the y-axis (Average Playtime), distributed over an index on the x-axis. The scatterplot indicates a heavy concentration of data points near the bottom of the plot, suggesting that most games have a low average playtime. There are a few points extending upwards, indicating outliers with significantly higher average playtimes.
+
+**Histogram**: The histogram illustrates the frequency distribution of average playtime. The x-axis represents bins of average playtime, and the y-axis represents the frequency of games falling into each bin. This plot reveals that a vast majority of games have a very low average playtime, as indicated by the tall bar at the far left. The frequency rapidly decreases for higher average playtimes, which confirms the presence of outliers suggested by the scatterplot.
+
+The second image shows two more plots: a Density Plot and an ECDF (Empirical Cumulative Distribution Function) Plot.
+
+**Density Plot**: This plot provides a smoothed continuous line representing the distribution of average playtime. It reinforces what the histogram showed, that there is a high density of games with low average playtime and a long tail towards higher playtimes, indicating the presence of outliers.
+
+**ECDF Plot**: This function plot is a step function that increases at the value of each data point. The x-axis is the average playtime, and the y-axis is the proportion of data points less than or equal to each value of average playtime. The steep curve at the beginning shows that a large proportion of the data is made up of games with very low average playtime, and then the curve plateaus, showing that only a small proportion of the data corresponds to higher playtimes.
+
+All 4 plots collectively depict a highly skewed distribution of average playtimes with a concentration at lower values and a long tail of outliers. This skewness could be a result of many games being played very little, with a few games accumulating much higher average playtimes, which may be indicative of a few very popular or engaging games. The presence of outliers and the heavily skewed distribution might warrant further investigation, such as outlier removal or data transformation (like logarithmic scaling), to facilitate more meaningful analysis.
+
+#### Log Transformation
+**Purpose**: Given the remaining skewness, a log transformation is applied to 
+average_playtime, aiming to normalize the distribution. This transformation is 
+a common technique for dealing with skewed data, making it more amenable to 
+statistical analysis and potentially revealing underlying patterns not apparent 
+in the raw data.
+
+```{r}
+# Apply log transformation on the filtered data to reduce skewness and stabilize variance
+nonzeroPlaytime$average_playtime <- log(nonzeroPlaytime$average_playtime)
+```
+
+```{r}
+# Visualizing the distribution of log-transformed average playtime with a histogram
+hist(nonzeroPlaytime$average_playtime, main = "Histogram (Log transformed)", xlab = "Log(average_playtime)", breaks = 50)
+# Creating a scatter plot for log-transformed average playtime to identify any patterns
+plot(nonzeroPlaytime$average_playtime, main = "Scatterplot (Log transformed)", ylab = "Log(average_playtime)")
+# Plotting a density plot to view the continuous probability distribution of log-transformed average playtime
+plot(density(nonzeroPlaytime$average_playtime), main = "Density Plot", xlab = "Log(average_playtime)")
+# An ECDF plot to observe the cumulative distribution of log-transformed average playtime
+plot(ecdf(nonzeroPlaytime$average_playtime), main = "ECDF Plot (Log transformed)", xlab = "Log(average_playtime)")
+```
+
+**Histogram (Log transformed)**: The histogram shows the frequency of games across different ranges of log-transformed playtime. It's more bell-shaped than the original, indicating a more normal-like distribution, which is better suited for linear regression.
+
+**Scatterplot (Log transformed)**: This shows the spread of log-transformed playtime values against their index. The data appears to be more evenly distributed across the range, with less distinct clumping at lower values.
+
+**Density Plot**: The plot shows a unimodal, relatively symmetric distribution around the peak, indicating that the log transformation has helped normalize the data.
+
+**ECDF Plot (Log transformed)**: This plot suggests that after log transformation, the data has a more linear progression, which is characteristic of a more uniform distribution when plotted in log scale. This uniformity is beneficial for many statistical models and analyses.
+
+In conclusion, the purpose of the code is to prepare the average_playtime data for regression analysis by reducing skewness through log transformation and visualizing the transformed data to ensure it meets the assumptions of normality and homoscedasticity required for a linear regression model. The plots provide evidence that the transformation was successful in creating a more symmetric distribution of playtime data.
+
+
+## Analyzing Positive Rating
+
+**Purpose**: preparing the positive_ratings variable for linear regression 
+analysis. The goal is to identify and mitigate the influence of outliers which
+could potentially skew the results of the regression model. By generating 
+summary statistics and visualizations, we can understand the distribution of 
+positive ratings and make informed decisions on data transformation, such as 
+log transformation, to normalize the data distribution. This preprocessing is a 
+critical step to ensure the validity of any inferences drawn from the linear 
+regression analysis that follows.
+```{r}
+# Generate summary statistics for the 'positive_ratings' column of the 'SteamData_final' dataset
+summary(SteamData_final$positive_ratings)
+# Plot the positive ratings to visually inspect for outliers across the dataset's items
+plot(SteamData_final$positive_ratings, main = "Scatter plot of positive ratings", ylab = "Positive Ratings")
+# Histogram to visualize distribution density and confirm the presence of outliers
+hist(SteamData_final$positive_ratings, main = "Histogram", xlab = "Positive Ratings", breaks = 100)
+```
+
+**Scatter Plot**: The scatter plot shows the positive ratings on the y-axis and each item’s index on the x-axis. The plot displays a similar pattern to the average playtime, with most items receiving a low number of positive ratings, and a few outliers receiving significantly higher numbers. This distribution is again heavily skewed, with the vast majority of items having very few positive ratings.
+
+**Histogram**: The histogram of positive ratings shows that the data is extremely right-skewed, with the majority of items receiving very few positive ratings and only a small number receiving a large number. The tall bar at the far left of the histogram represents a high frequency of items with low positive ratings, and there's a long tail to the right indicating the presence of items with very high positive ratings.
+
+For further analysis, it might be useful to log-transform the positive ratings to normalize the distribution, similar to the average playtime, or to identify specific characteristics that contribute to higher positive ratings.
+
+#### Identify Non-Zero Positive Rating
+**Purpose**: To address the skew, the analysis narrows down to entries with 
+non-zero positive_ratings, ensuring the focus remains on actively engaged games. 
+This subset creation is crucial for meaningful analysis, avoiding distortion 
+fromgames with no engagement.
+
+```{r}
+# Filtering data to include only non-zero positive ratings for relevant analysis
+nonZeroPositiveData <- subset(SteamData_final, positive_ratings > 0 & !is.na(positive_ratings))
+```
+
+#### Outlier Removal For Non-Zero Positive Ratings
+
+**Purpose**: The purpose of this code is to identify and remove outliers from 
+the nonZeroPositiveData$positive_ratings data. This process is important in 
+data pre-processing, particularly before conducting statistical analyses or 
+machine learning modeling, because outliers can significantly skew the results 
+and lead to incorrect conclusions.
+
+```{r}
+# Defining interquartile range (IQR) for identifying outliers in a robust manner
+positive_ratings_Q1 <- quantile(nonZeroPositiveData$positive_ratings, 0.25)
+positive_ratings_Q3 <- quantile(nonZeroPositiveData$positive_ratings, 0.75)
+positive_ratings_IQR <- positive_ratings_Q3 - positive_ratings_Q1
+
+# Calculating the bounds to define what is considered an outlier
+positive_ratings_lower_bound <- positive_ratings_Q1 - 1.5 * positive_ratings_IQR
+positive_ratings_upper_bound <- positive_ratings_Q3 + 1.5 * positive_ratings_IQR
+
+# Subsetting the data to exclude outliers
+nonZeroPositiveData <- subset(nonZeroPositiveData, positive_ratings >= positive_ratings_lower_bound & positive_ratings <= positive_ratings_upper_bound)
+
+# Checking the structure and summary of the cleaned data
+str(nonZeroPositiveData$positive_ratings)
+summary(nonZeroPositiveData$positive_ratings)
+
+# Visual inspection of the data post-cleaning
+par(mfrow = c(1,2)) # Sets the graphics layout for two plots side by side
+# Scatter Plot
+hist(nonZeroPositiveData$positive_ratings, main = "Histogram", xlab = "positive_ratings", breaks = 100)
+# Histogram
+plot(nonZeroPositiveData$positive_ratings, main = "Scatterplot", ylab = "positive_ratings")
+# Density Plot
+plot(density(nonZeroPositiveData$positive_ratings), main = "Density Plot ", xlab = "positive_ratings" )
+# ECDF Plot
+plot(ecdf(nonZeroPositiveData$positive_ratings), main = "ECDF Plot", xlab = "positive_ratings" )
+```
+
+**Histogram**: The histogram shows a very right-skewed distribution of `positive_ratings`. The majority of the games have very few positive ratings, with the tall bars on the left, and there's a long tail towards the right indicating fewer games with many positive ratings.
+
+**Scatterplot**: The scatterplot demonstrates each game's positive ratings against its index in the dataset. It illustrates a dense cluster of points near the bottom, showing that most games have a lower number of positive ratings, and a few outliers with a much higher number of positive ratings.
+
+**Density Plot**: This plot provides a smoothed estimate of the distribution of `positive_ratings`. It emphasizes the right skew seen in the histogram and shows a peak at lower rating values, again indicating that most games have fewer positive ratings.
+
+**ECDF Plot**: The Empirical Cumulative Distribution Function (ECDF) plot shows the proportion of games with a number of positive ratings less than or equal to each point on the x-axis. The steep curve at the beginning indicates a large number of games with few positive ratings, and it levels off towards the right, showing that very few games have a high number of positive ratings.
+
+All these plots confirm a highly skewed distribution with many games receiving few positive ratings and a small number receiving a large number of positive ratings. This skewness in the distribution suggests that outlier removal and data transformation might be necessary steps before proceeding to regression analysis, to ensure that the assumptions of the linear model are not violated.
+
+#### Log Transformation
+
+**Purpose**: Given the remaining skewness, a log transformation is applied to 
+positive_ratings, aiming to normalize the distribution. This transformation is 
+a common technique for dealing with skewed data, making it more amenable to 
+statistical analysis and potentially revealing underlying patterns not apparent 
+in the raw data.
+
+```{r}
+# Apply log transformation on the filtered data to reduce skewness and stabilize variance
+nonZeroPositiveData$positive_ratings <- log(nonZeroPositiveData$positive_ratings)
+```
+
+
+```{r}
+# Visualizing the distribution of log-transformed positive_ratings with a histogram
+hist(nonZeroPositiveData$positive_ratings, main = "Histogram (Log transformed)", xlab = "Log(positive_ratings)", breaks = 100)
+# Creating a scatter plot for log-transformed positive_ratings to identify any patterns
+plot(nonZeroPositiveData$positive_ratings, main = "Scatterplot (Log transformed)", ylab = "Log(positive_ratings)")
+# Plotting a density plot to view the continuous probability distribution of log-transformed positive_ratings
+plot(density(nonZeroPositiveData$positive_ratings), main = "Density Plot ", xlab = "Log(positive_ratings)" )
+# An ECDF plot to observe the cumulative distribution of log-transformed positive_ratings
+plot(ecdf(nonZeroPositiveData$positive_ratings), main = "ECDF Plot (Log transformed)", xlab = "Log(positive_ratings)" )
+```
+
+**Histogram (Log transformed)**: The histogram shows that the log transformation of `positive_ratings` leads to a distribution that is still somewhat right-skewed but less extreme than the original distribution. There is a clear mode around lower log values, and the frequency tails off as the log value increases, which is typical after log transformation of heavily skewed data.
+
+**Scatterplot (Log transformed)**: The scatterplot illustrates the log-transformed `positive_ratings` against the index (which likely represents individual items or games). This plot reveals a dense clustering at lower log values, which spreads out as the log value increases. This indicates that while many items have low positive ratings, there's a range of variability once the data is log-transformed.
+
+**Density Plot**: This plot presents a smoothed version of the histogram and shows a single, clear peak with a long tail to the right. The peak represents the most common range of log-transformed positive ratings. The shape suggests a log-normal distribution, which is common when dealing with data that has been log-transformed to address skewness.
+
+**ECDF Plot (Log transformed)**: The Empirical Cumulative Distribution Function plot for the log-transformed data shows a steep curve at the lower end of the scale, leveling off as it approaches the higher log values. This suggests that a large proportion of the data consists of items with a lower number of positive ratings, while fewer items have a high number of positive ratings, even on a log scale.
+
+In summary, the log transformation has made the data less skewed, which could potentially improve the performance of statistical models that assume normally distributed residuals, such as linear regression. Despite the transformation, the right skewness indicates that there are still items with exceptionally high positive ratings relative to the rest of the data.
+
+## Analyzing Negative Rating
+
+**Purpose**: preparing the negative_ratings variable for linear regression 
+analysis. The goal is to identify and mitigate the influence of outliers which
+could potentially skew the results of the regression model. By generating 
+summary statistics and visualizations, we can understand the distribution of 
+negative_ratings and make informed decisions on data transformation, such as 
+log transformation, to normalize the data distribution. This preprocessing is a 
+critical step to ensure the validity of any inferences drawn from the linear 
+regression analysis that follows.
+
+```{r}
+# Generate summary statistics for the 'negative_ratings' column of the 'SteamData_final' dataset
+summary(SteamData_final$negative_ratings)
+# Plot the negative ratings to visually inspect for outliers across the dataset's items
+plot(SteamData_final$negative_ratings, main = "Scatter plot of negative ratings", ylab = "Negative Ratings")
+# Histogram to visualize distribution density and confirm the presence of outliers
+hist(SteamData_final$negative_ratings, main = "Histogram", xlab = "Negative Ratings", breaks = 100)
+```
+
+**Scatter plot**: The scatter plot reflects this skewness with a dense cluster of points near the origin and a few points lying far above the rest, indicating that while the majority of games have few negative ratings, a small number have accumulated a large number.
+
+**Histogram**: The histogram indicates an extremely right-skewed distribution of negative ratings. The majority of items have very few negative ratings, which is evident from the tall bar at the histogram's left side. There's a long tail towards higher values, reflecting the presence of items with a large number of negative ratings (outliers).
+
+In summary, the analysis of the negative_ratings suggests that while most games are well-received, a few games have a disproportionately high number of negative ratings, which could significantly impact any aggregate analysis such as mean calculations or modeling work like regression analysis.For further analysis, it might be useful to log-transform the positive ratings to normalize the distribution, similar to the average playtime, or to identify specific characteristics that contribute to higher negative ratings.
+
+#### Identify Non-Zero Negative Rating
+**Purpose**: To address the skew, the analysis narrows down to entries with 
+non-zero negative_ratings, ensuring the focus remains on actively engaged games. 
+This subset creation is crucial for meaningful analysis, avoiding distortion 
+fromgames with no engagement.
+
+```{r}
+# Filtering data to include only non-zero negative ratings for relevant analysis
+nonZeroNegativeData <- subset(SteamData_final, negative_ratings > 0 & !is.na(negative_ratings))
+```
+
+#### Outlier Removal For Non-Zero Negative Ratings
+
+**Purpose**: The purpose of this code is to identify and remove outliers from 
+the nonZeroNegativeData$negative_ratings data. This process is important in 
+data pre-processing, particularly before conducting statistical analyses or 
+machine learning modeling, because outliers can significantly skew the results 
+and lead to incorrect conclusions.
+
+```{r}
+# Defining interquartile range (IQR) for identifying outliers in a robust manner
+negative_ratings_Q1 <- quantile(nonZeroNegativeData$negative_ratings, 0.25)
+negative_ratings_Q3 <- quantile(nonZeroNegativeData$negative_ratings, 0.75)
+negative_ratings_IQR <- negative_ratings_Q3 - negative_ratings_Q1
+
+# Calculating the bounds to define what is considered an outlier
+negative_ratings_lower_bound <- negative_ratings_Q1 - 1.5 * negative_ratings_IQR
+negative_ratings_upper_bound <- negative_ratings_Q3 + 1.5 * negative_ratings_IQR
+
+# Subsetting the data to exclude outliers
+nonZeroNegativeData <- subset(nonZeroNegativeData, negative_ratings >= negative_ratings_lower_bound & negative_ratings <= negative_ratings_upper_bound)
+
+# Checking the structure and summary of the cleaned data
+str(nonZeroNegativeData$negative_ratings)
+summary(nonZeroNegativeData$negative_ratings)
+
+# Visual inspection of the data post-cleaning
+par(mfrow = c(1,2)) # Sets the graphics layout for two plots side by side
+# Scatter Plot
+plot(nonZeroNegativeData$negative_ratings, main = "Scatterplot", ylab = "Negative Rating")
+# Histogram
+hist(nonZeroNegativeData$negative_ratings, main = "Histogram", xlab = "Negative Rating", breaks = 100)
+# Density Plot
+plot(density(nonZeroNegativeData$negative_ratings), main = "Density Plot", xlab = "Negative Rating" )
+# ECDF Plot
+plot(ecdf(nonZeroNegativeData$negative_ratings), main = "ECDF Plot", xlab = "Negative Rating" )
+```
+
+After removing outliers using the Interquartile Range (IQR) method, the `negative_ratings` data have become more centralized and less skewed. The summary statistics show a significant decrease in the range of values, with the maximum dropping from 487,076 to just 123. The median is 8, which indicates that more than half of the games have fewer than 8 negative ratings. The mean has also dropped to approximately 19.76, suggesting that the average is no longer inflated by extreme outliers.
+
+**Scatter Plot**: The scatterplot now shows a denser clustering of points near the lower end of the negative ratings scale, without the previously seen extreme values. 
+
+**Histogram**: The histogram confirms this centralized tendency, with the majority of the games receiving a low number of negative ratings and very few games receiving higher numbers. This indicates a more uniform and less variable set of data, which can be more reliably used for further analysis.
+
+**Density Plot**: The density plot also reflects this change, showing a sharper peak with the tail tapering off more quickly than before outlier removal. 
+
+**ECDF Plot**: The ECDF plot reveals a steeper curve at the start, reflecting the concentration of games with low negative ratings.
+
+In essence, the removal of outliers has normalized the data distribution, making it better suited for statistical modeling, as extreme values can disproportionately affect the results of many analysis techniques.
+
+#### Log Transformation
+
+**Purpose**: Given the remaining skewness, a log transformation is applied to 
+negative_ratings, aiming to normalize the distribution. This transformation is 
+a common technique for dealing with skewed data, making it more amenable to 
+statistical analysis and potentially revealing underlying patterns not apparent 
+in the raw data.
+
+```{r}
+# Apply log transformation on the filtered data to reduce skewness and stabilize variance
+nonZeroNegativeData$negative_ratings <- log(nonZeroNegativeData$negative_ratings)
+```
+
+**Log Transformation**: Applying a logarithm to the data is a common strategy to
+handle right-skewed distributions. It compresses the scale of large values more 
+than that of smaller values, thus pulling in the long right tail of the 
+distribution.
+
+```{r}
+# Visualizing the distribution of log-transformed negative_ratings with a histogram
+hist(nonZeroNegativeData$negative_ratings, main = "Histogram (Log transformed)", xlab = "Log(negative_ratings)", breaks = 100)
+# Creating a scatter plot for log-transformed negative_ratings to identify any patterns
+plot(nonZeroNegativeData$negative_ratings, main = "Scatterplot (Log transformed)", ylab = "Log(negative_ratings)")
+# Plotting a density plot to view the continuous probability distribution of log-transformed negative_ratings
+plot(density(nonZeroNegativeData$negative_ratings), main = "Density Plot ", xlab = "Log(negative_ratings)" )
+# An ECDF plot to observe the cumulative distribution of log-transformed negative_ratings
+plot(ecdf(nonZeroNegativeData$negative_ratings), main = "ECDF Plot (Log transformed)", xlab = "Log(negative_ratings)" )
+```
+
+**Histograms**: This histogram shows the frequency distribution of the logarithm of negative ratings. The distribution is right-skewed, meaning there are a lot of entries with a low number of negative ratings and few with a high number. The highest frequency is at the lower end of the log scale, close to 0, which suggests that the majority of the data consists of ratings that are low when log-transformed (indicating a small number of negative ratings before the transformation). There's a long tail to the right, which represents a smaller number of instances with a large number of negative ratings. The skewness implies that the underlying data has a large number of cases with few negative ratings and a few cases with many negative ratings.
+
+**Scatterplots**: The scatterplot visualizes individual data points, showing the log of negative ratings against their index in the dataset. We observe a "banding" effect where many points are concentrated at specific levels, suggesting that there are common log-negative rating values. This could imply the presence of specific thresholds or categories within the ratings. The plot does not indicate any clear trend over the index; hence, the index may not have a direct relationship with the magnitude of the negative ratings.
+
+**Density Plot**: The density plot is a smoothed version of the histogram and shows where the data is concentrated over the interval of log-negative ratings. There are several peaks, suggesting a multi-modal distribution. This indicates the presence of multiple groups or types of data points within the dataset. The peaks correspond to the most common log-negative rating values, whereas the valleys suggest less common values. The declining tail to the right confirms the right skewness observed in the histogram.
+
+**ECDF Plot**: The ECDF plot shows the cumulative proportion of observations below each value of log-negative ratings.
+This step function increases monotonically from 0 to 1, where the steeper parts of the curve represent the values with the most data points. The plot starts to flatten as it approaches a log-negative rating of 5, indicating that there are very few ratings above this value. 
+
+In summary, the log transformation has made the data less skewed, which could potentially improve the performance of statistical models that assume normally distributed residuals, such as linear regression. Despite the transformation, the right skewness indicates that there are still items with exceptionally high negative ratings relative to the rest of the data.
+
+## 1. Which general factors are associated with the highest positive rating?
+
+#### Correlation Analysis
+
+**Objective**: Identifies variables that significantly correlate with positive ratings. Aims to streamline the data to include only the variables that have a significant correlation with positive ratings. This helps in identifying the key factors that could be predictive of or associated with higher positive ratings, which is essential for building a predictive model or for focusing on areas of improvement or analysis.
+
+```{r}
+# Subset the data to include only the variables we are interested in, excluding 'appid'
+positiveData <- select(nonZeroPositiveData, -c(appid))
+
+# Compute correlations between 'positive_ratings' and each numeric variable in the dataset
+# Skip variables with a standard deviation of zero as they are constant and cannot be correlated
+positive_correlations <- sapply(colnames(positiveData[, sapply(positiveData, is.numeric)]), function(var_name) {
+  if (is.numeric(positiveData[[var_name]]) && var_name != 'positive_ratings') {
+    if (sd(positiveData[[var_name]], na.rm = TRUE) != 0) {
+      cor(positiveData[[var_name]], positiveData$positive_ratings, use = "complete.obs", method = "pearson")
+    } else {
+      NA  # Variables with zero variance are excluded by setting them to NA
+    }
+  }
+})
+
+# Discard any NAs that may have resulted from the previous step
+positive_na_columns <- names(positive_correlations)[is.na(positive_correlations)]
+positive_correlations_clean <- positive_correlations[!is.na(positive_correlations)]
+
+# Refine the dataset to include only variables with a valid correlation to positive ratings
+positiveData <- select(positiveData, -all_of(positive_na_columns))
+
+# Convert the list of correlations to a numeric vector for plotting
+positive_correlations_numeric <- unlist(positive_correlations_clean)
+
+# Create a bar plot of the correlations with positive ratings
+barplot(positive_correlations_numeric, las=2, main="General Factors Correlation with Positive Ratings", col="blue", names.arg = names(positive_correlations_numeric))
+
+```
+
+#### Model Preparation and Selection
+
+**Data Partitioning**: The purpose of this code is to partition the dataset into a training set and a testing set. The training set is used to build the model, and the testing set is used to evaluate its performance. This approach helps to assess how well the model is likely to perform on unseen data, thus giving an indication of its generalization ability.
+
+```{r}
+# Set a seed for random number generation to ensure that the results are reproducible
+set.seed(123)
+
+# Calculate the total number of rows in the 'positiveData' dataset
+positive_data_size <- nrow(positiveData)
+
+# Calculate the number of rows that make up 70% of the dataset
+positive_train_size <- floor(0.7 * positive_data_size)
+
+# Randomly select row indices for the training set based on the size calculated
+positive_train_indices <- sample(seq_len(positive_data_size), size = positive_train_size)
+
+# Use the selected indices to create the training dataset
+positive_train_data <- positiveData[positive_train_indices, ]
+
+# Use the remaining indices to create the testing dataset
+positive_test_data <- positiveData[-positive_train_indices, ]
+```
+
+#### Model Building
+
+**Objective**: Starts with an intercept-only model and progresses
+through forward stepwise regression to select the most significant
+predictors of positive ratings. This iterative process helps in building
+a parsimonious model that explains the data well without overfitting.
+
+```{r}
+# Build linear regression models: Starting with an intercept-only model, then using all predictors
+# Forward stepwise regression is used to select significant predictors
+
+# Define the intercept-only model, which includes no predictors.
+positive_intercept_model <- lm(positive_ratings ~ 1, data=positive_train_data)
+
+# Define the full model with all possible predictors.
+positive_all_model <- lm(positive_ratings ~ ., data=positive_train_data)
+
+# Conduct forward stepwise regression starting from the intercept-only model and considering all predictors.
+positive_forward_model <- step(positive_intercept_model, direction='forward', scope=formula(positive_all_model), trace=0)
+
+# Output the summary of the final model to view its details, including estimated coefficients, statistical significance, etc.
+summary(positive_forward_model)
+```
+
+The output provided is the summary of a linear regression model where `positive_ratings` is the dependent variable, and various factors, likely associated with a gaming platform such as Steam, are the independent variables. Here is an analysis of the output:
+
+**Residuals**: The residuals' summary suggests that the model's predictions deviate from the actual ratings by as much as 22.0367 in the worst case but tend to be closer on average (Median is 0.0961).
+
+**Significant Predictors**: Most of the variables listed are statistically significant predictors of `positive_ratings` as their p-values are below 0.05, with varying degrees of effect sizes.
+
+**Overall Model Fit**:
+   - **Residual standard error (RSE)**: Measures the average amount that the response will deviate from the true regression line; it is 1.138 for this model.
+   - **Multiple R-squared**: Indicates that approximately 44.31% of the variability in `positive_ratings` is explained by the model.
+   - **Adjusted R-squared**: Slightly less than the R-squared, at 44.17%, it adjusts for the number of predictors in the model, providing a more accurate measure of model fit.
+   - **F-statistic**: Used to determine if the observed relationships between the dependent and independent variables are due to chance. The extremely low p-value suggests that the model is statistically significant.
+
+**Summary**:
+The model appears to be statistically significant with multiple predictors influencing the `positive_ratings`. Some variables have a positive association (e.g., `Steam Trading Cards`, `Free to Play`, `owners`), while others like `Casual` and `Early Access` negatively affect the `positive_ratings`. The model explains a good proportion of the variability in positive ratings, but there's still over half of the variance that is unexplained, indicating that other factors not included in the model might affect `positive_ratings`. The residuals' distribution and the relatively low RSE show that the model has a good fit.
+
+#### Multicollinearity Assessment - Variance Inflation Factor (VIF):
+
+**Objective**: VIF assesses multicollinearity by measuring how much the
+variance of an estimated regression coefficient increases if predictors
+are correlated. A VIF value above 5 indicates high multicollinearity,
+suggesting that the predictor may be redundant due to linear
+relationships with other predictors. Examining VIF helps in diagnosing
+potential issues with the model related to multicollinearity.
+
+**Result**: All VIF values are below 5, which suggests that
+multicollinearity is not a severe problem for every variables in the
+model.
+
+```{r}
+# View Variance Inflation Factor (VIF) for the final model
+vif(positive_forward_model)
+```
+
+#### Diagnostic Tests and Model Evaluation - Residual Analysis:
+
+The diagnostic plots provided are common tools used in regression analysis to evaluate the assumptions of the linear model. These include the normality of residuals, homoscedasticity (equal variance of residuals), and the influence of individual data points. Here's an explanation of each plot and what it indicates about the model:
+
+**Normal Q-Q Plot**: This plot is used to assess whether the residuals of the model have a normal distribution, which is a key assumption of linear regression. The points should fall approximately along the reference line (red line). In this Q-Q plot, the points deviate from the line in the tails, especially in the lower tail, indicating that the residuals may have a distribution with heavier tails than a normal distribution.
+
+```{r}
+# Normality of Residuals
+
+# Extract residuals
+positive_res <- residuals(positive_forward_model)
+# QQ plot for normality check
+qqnorm(positive_res)
+# Add reference line to QQ plot
+qqline(positive_res, col = "red")
+```
+
+**Residuals vs. Fitted Values Plot**: This plot checks for homoscedasticity, meaning that the residuals have constant variance across all levels of the fitted values. In this plot, there's a clear funnel-shaped pattern, which suggests heteroscedasticity; the variance of the residuals is not constant across the range of fitted values.
+
+```{r}
+# Homoscedasticity
+
+# Plot residuals vs. fitted values for homoscedasticity check
+plot(fitted(positive_forward_model), positive_res, xlab = "Fitted Values", ylab = "Residuals", main = "Residuals vs. Fitted Values")
+
+# Add horizontal line at 0
+abline(h = 0, col = "red")
+```
+
+**Leverage Values Plot**: This plot shows the leverage of each observation, which is a measure of how much an individual data point can potentially influence the regression model. Data points with high leverage can unduly affect the model's parameters. In this plot, while most data points have low leverage, a few have moderately high leverage, indicating they could be influential points worth investigating.
+
+```{r}
+# Plot leverage values to identify influential observations
+plot(hatvalues(positive_forward_model), main="Leverage Values")
+```
+
+**Performance Metrics**: The model's performance is assessed using three key metrics: Mean Squared Error (MSE), Mean Absolute Error (MAE), and Root Mean Squared Error (RMSE). These metrics are calculated for both the training data and the testing data to understand the model's predictive accuracy and generalization ability.
+
+Mean Squared Error (MSE): Measures the average of the squares of the errors, that is, the average squared difference between the estimated values and the actual value.
+Mean Absolute Error (MAE): Measures the average of the absolute errors, the average absolute difference between the estimated values and the actual value.
+Root Mean Squared Error (RMSE): The square root of the MSE, which is useful because it has the same units as the response variable and thus can be more interpretable.
+
+```{r}
+# Making predictions on the training set
+prediction_positive_train <- predict(positive_forward_model, newdata = positive_train_data)
+mse_positive_train <- mse(positive_train_data$positive_ratings, prediction_positive_train)
+mae_positive_train <- mae(positive_train_data$positive_ratings, prediction_positive_train)
+rmse_positive_train <- rmse(positive_train_data$positive_ratings, prediction_positive_train)
+
+# Making predictions on the testing set
+prediction_positive_test <- predict(positive_forward_model, newdata = positive_test_data)
+
+mse_positive_test <- mse(positive_test_data$positive_ratings, prediction_positive_test)
+mae_positive_test <- mae(positive_test_data$positive_ratings, prediction_positive_test)
+rmse_positive_test<- rmse(positive_test_data$positive_ratings, prediction_positive_test)
+
+# Print the errors
+print(paste("Training Root Mean Squared Error (RMSE) with Linear Regression Model:", rmse_positive_train))
+print(paste("Training Mean Squared Error (MSE) with Linear Regression Model:", mse_positive_train))
+print(paste("Training Mean Absolute Error (MAE) with Linear Regression Model:", mae_positive_train))
+
+print(paste("Testing Root Mean Squared Error (RMSE) with Linear Regression Model:", rmse_positive_test))
+print(paste("Testing Mean Squared Error (MSE) with Linear Regression Model:", mse_positive_test))
+print(paste("Testing Mean Absolute Error (MAE) with Linear Regression Model:", mae_positive_test))
+```
+
+- The RMSE and MAE on both the training and testing sets are relatively close, which suggests that the model is not overfitted to the training data; it generalizes fairly well to unseen data.
+- The RMSE values being just slightly higher than the MAE values indicates that there are some larger errors which are having a more pronounced effect on the RMSE due to the squaring term.
+- The MSE being larger than the RMSE (which is to be expected since RMSE is the square root of MSE) indicates that there are errors being squared, which emphasizes larger errors more than smaller ones.
+
+**Conclusion**:
+The similarity in performance between the training and testing datasets suggests that the model’s predictions are consistent across both sets, which is desirable. The values of RMSE and MAE indicate the typical error margin to expect from predictions made with this model. Given the scale of positive_ratings, whether these error margins are acceptable depends on the specific business or research context. 
+
+#### Result
+
+**Coefficient Plot:** The coefficient plot provided visualizes the estimated coefficients of the top 15 predictors from a linear regression model, ranked by their absolute value. Each point on the plot represents the estimated effect size of a predictor variable, and the horizontal lines indicate the standard errors, giving a sense of the precision of these estimates.
+
+```{r}
+# Prepare the Model Data:
+# Converts the linear regression model into a tidy data frame. This data frame includes a row for each model predictor, with columns for estimates, standard errors, and other statistics.
+
+tidied_model <- tidy(positive_forward_model)
+
+# Exclude the intercept from the tidied model summary
+tidied_model <- tidied_model %>% filter(!term %in% c("(Intercept)", "pos_rate", "negative_ratings"))
+
+ # Order coefficients by their absolute values
+tidied_model$absolute_estimate <- abs(tidied_model$estimate)
+top_coefficients <- tidied_model[order(-tidied_model$absolute_estimate), ][1:15, ]
+
+# Plot the top 10 coefficients based on absolute value
+ggplot(top_coefficients, aes(x = reorder(term, absolute_estimate), y = estimate)) +
+  geom_point() +
+  geom_errorbar(aes(ymin = estimate - std.error, ymax = estimate + std.error), width = 0.2) +
+  theme_minimal() +
+  coord_flip() +
+  labs(x = "Predictors", y = "Estimated Coefficients",
+       title = "Top 15 Coefficients of the Linear Regression Model")
+```
+
+1. **Valve Anti-Cheat enabled**: This predictor has the largest positive coefficient, suggesting that games with Valve Anti-Cheat enabled tend to have higher positive ratings, and the effect size is relatively precise (small standard error).
+
+2. **Game Development**: This variable has a substantial negative coefficient, which may imply that games associated with this tag have lower positive ratings.
+
+3. **SteamVR Collectibles**: Shows a positive coefficient, indicating a positive relationship with the positive ratings.
+
+4. **Free to Play**: This feature has a positive effect, which is consistent with the notion that free-to-play games could receive a higher volume of positive ratings.
+
+5. **Software Training**: Exhibits a positive effect, although less than that of Free to Play.
+
+6. **Steam Trading Cards**: Another positive predictor, indicating that games offering trading cards are likely to have higher positive ratings.
+
+7. **VR Support**: Similar to SteamVR Collectibles, suggesting that VR support is associated with higher positive ratings.
+
+8. **Education**: This coefficient is negative but with a wide standard error, suggesting less certainty about the estimate.
+
+9. **Local Multi-Player**, **Nudity**, **Multi-player**, **Casual**, **Steam Achievements**, **Simulation**, and **Steam Workshop**: All have positive coefficients but with varying standard errors.
+
+The **horizontal error bars** represent the standard error of the estimates, giving an idea of the statistical precision. Smaller bars suggest a higher degree of certainty in the coefficient estimate.
+
+
+## 2. Which general factors are associated with the highest negative rating?
+
+#### Correlation Analysis
+
+**Objective**: Identifies variables that significantly correlate with negative ratings. Aims to streamline the data to include only the variables that have a significant correlation with negative ratings. This helps in identifying the key factors that could be predictive of or associated with higher negative ratings, which is essential for building a predictive model or for focusing on areas of improvement or analysis.
+
+```{r}
+# Subset the data to include only the variables we are interested in, excluding 'appid'
+negativeData <- select(nonZeroNegativeData, -c(appid))
+
+# Compute correlations between 'negative_ratings' and each numeric variable in the dataset
+# Skip variables with a standard deviation of zero as they are constant and cannot be correlated
+negative_correlations <- sapply(colnames(negativeData[,sapply(negativeData,is.numeric)]), 
+  function(var_name) { if (is.numeric(negativeData[[var_name]]) && var_name != 'negative_ratings') {
+    # Check if the standard deviation is not zero
+    if (sd(negativeData[[var_name]], na.rm = TRUE) != 0) {
+      cor(negativeData[[var_name]], negativeData$negative_ratings, use = "complete.obs", method = "pearson") 
+    } else {
+      NA  # Return NA for variables with a standard deviation of zero
+    }
+  }
+})
+
+# Discard any NAs that may have resulted from the previous step
+negative_na_columns <- names(negative_correlations)[is.na(negative_correlations)]
+negative_correlations_clean <- negative_correlations[!is.na(negative_correlations)]
+
+# Refine the dataset to include only variables with a valid correlation to negative ratings
+negativeData <- select(negativeData, -all_of(negative_na_columns))
+
+# Convert the list of correlations to a numeric vector for plotting
+negative_correlations_numeric <- unlist(negative_correlations_clean)
+
+# Create a bar plot of the correlations with negative ratings
+barplot(negative_correlations_numeric, las=2, main="General Factors Correlation with Negative Ratings", col="blue", names.arg = names(negative_correlations_numeric))
+
+```
+
+#### Model Preparation and Selection
+
+**Data Partitioning**: The purpose of this code is to partition the dataset into a training set and a testing set. The training set is used to build the model, and the testing set is used to evaluate its performance. This approach helps to assess how well the model is likely to perform on unseen data, thus giving an indication of its generalization ability.
+
+```{r}
+# Set a seed for random number generation to ensure that the results are reproducible
+set.seed(124) # Ensure reproducibility
+
+# Calculate the total number of rows in the 'negativeData' dataset
+negative_data_size <- nrow(negativeData)
+
+# Calculate the number of rows that make up 70% of the dataset
+negative_train_size <- floor(0.7 * negative_data_size)
+
+# Randomly select row indices for the training set based on the size calculated
+negative_train_indices <- sample(seq_len(negative_data_size), size = negative_train_size)
+
+# Use the selected indices to create the training dataset
+negative_train_data <- negativeData[negative_train_indices, ]
+
+# Use the remaining indices to create the testing dataset
+negative_test_data <- negativeData[-negative_train_indices, ]
+```
+
+#### Model Building
+
+**Objective**: Starts with an intercept-only model and progresses
+through forward stepwise regression to select the most significant
+predictors of positive ratings. This iterative process helps in building
+a parsimonious model that explains the data well without overfitting.
+
+```{r}
+# Build linear regression models: Starting with an intercept-only model, then using all predictors
+# Forward stepwise regression is used to select significant predictors
+
+# Define the intercept-only model, which includes no predictors
+negative_intercept_model <- lm(negative_ratings ~ 1, data=negative_train_data)
+
+# Define the full model with all possible predictors.
+negative_all_model <- lm(negative_ratings ~ ., data=negative_train_data)
+
+# Conduct forward stepwise regression starting from the intercept-only model and considering all predictors.
+negative_forward_model <- step(negative_intercept_model, direction='forward', scope=formula(negative_all_model), trace=0)
+
+# Output the summary of the final model to view its details, including estimated coefficients, statistical significance, etc.
+summary(negative_forward_model)
+```
+
+This output of linear regression model summary which attempts to predict `negative_ratings` based on a variety of predictors related to game or software attributes. Let's break down the output:
+
+**Coefficients**: The coefficients show the estimated impact of each predictor variable on `negative_ratings`, controlling for other factors. Positive coefficients (e.g., `Steam Trading Cards`, `Free to Play`, `VR Support`) suggest that as the predictor increases, negative ratings also increase. Negative coefficients (e.g., `pos_rate`, `Local Multi-Player`, `Casual`) indicate that as the predictor increases, negative ratings decrease.
+
+**Residuals**: Residuals represent the difference between observed and predicted values of `negative_ratings`. The summary suggests that residuals range from -13.2244 to 2.9797, with a median very close to 0, which is good. However, the range indicates there are some large prediction errors.
+
+**Model Fit**: 
+- `Multiple R-squared` value of 0.3718 suggests that around 37.18% of the variability in negative ratings is explained by the model.
+- `Adjusted R-squared` is slightly lower at 0.3699, which takes into account the number of predictors and the sample size to provide a more accurate measure of model fit.
+- The `F-statistic` tests the overall significance of the model. The extremely low p-value (< 2.2e-16) indicates that the model is statistically significant; the variables collectively have a strong relationship with negative ratings.
+
+**Interpretation**: The model suggests that factors such as `Steam Trading Cards`, `Free to Play`, and the number of `owners` are associated with higher negative ratings, while a higher `pos_rate` is associated with lower negative ratings. The model seems to capture a significant portion of the factors affecting negative ratings, but not all (as indicated by an R-squared of ~37%). Coefficients with large standard errors, like `Valve Anti-Cheat enabled`, indicate less certainty about the estimate and should be interpreted cautiously.
+
+**Summary**: The model has identified several significant predictors of negative ratings. These can be used to understand the factors that contribute to negative perceptions of games or software. However, the significant residuals and the moderate R-squared value indicate that there may be other factors not included in the model or that the relationships are not purely linear. The significant predictors could be used to advise on game development and marketing to potentially reduce negative ratings.
+
+#### Multicollinearity Assessment - Variance Inflation Factor (VIF):
+
+**Objective**: VIF assesses multicollinearity by measuring how much the
+variance of an estimated regression coefficient increases if predictors
+are correlated. A VIF value above 5 indicates high multicollinearity,
+suggesting that the predictor may be redundant due to linear
+relationships with other predictors. Examining VIF helps in diagnosing
+potential issues with the model related to multicollinearity.
+
+**Result**: All VIF values are below 5, which suggests that
+multicollinearity is not a severe problem for every variables in the
+model.
+
+```{r}
+# View Variance Inflation Factor (VIF) for the final model
+vif(negative_forward_model)
+```
+
+#### Diagnostic Tests and Model Evaluation - Residual Analysis:
+
+The diagnostic plots provided are common tools used in regression analysis to evaluate the assumptions of the linear model. These include the normality of residuals, homoscedasticity (equal variance of residuals), and the influence of individual data points. Here's an explanation of each plot and what it indicates about the model:
+
+**Normal Q-Q Plot**: This plot checks if the residuals from the model are normally distributed, which is an important assumption in regression analysis. The points follow the reference line closely in the middle quantiles, which suggests that the residuals are approximately normally distributed in that range. However, the points deviate significantly from the line in the tails, particularly in the lower tail. This indicates that the residuals have heavier tails than expected under normality, suggesting the presence of outliers or that the normality assumption is violated.
+
+```{r}
+# Normality of Residuals
+
+# Extract residuals
+negative_res <- residuals(negative_forward_model)
+# QQ plot for normality check
+qqnorm(negative_res)
+# Add reference line to QQ plot
+qqline(negative_res, col = "red")
+```
+
+**Residuals vs. Fitted Values Plot**: This plot is used to check the assumption of homoscedasticity (constant variance of the residuals across all levels of the fitted values). The plot shows a fan or funnel-shaped pattern, which is indicative of heteroscedasticity. This means that the variance of the residuals is not constant and tends to increase as the fitted values increase.
+
+```{r}
+# Homoscedasticity
+
+# Plot residuals vs. fitted values for homoscedasticity check
+plot(fitted(negative_forward_model), negative_res, xlab = "Fitted Values", ylab = "Residuals", main = "Residuals vs. Fitted Values")
+
+# Add horizontal line at 0
+abline(h = 0, col = "red")
+```
+
+**Leverage Values Plot**: Leverage values help identify influential data points that have a disproportionate influence on the model. Most data points have low leverage, but a few have higher leverage, though not excessively so. The points with higher leverage could potentially be influential cases that may disproportionately affect the model's coefficients.
+
+```{r}
+# Plot leverage values to identify influential observations
+plot(hatvalues(negative_forward_model), main="Leverage Values")
+```
+
+**Performance Metrics**: The model's performance is assessed using three key metrics: Mean Squared Error (MSE), Mean Absolute Error (MAE), and Root Mean Squared Error (RMSE). These metrics are calculated for both the training data and the testing data to understand the model's predictive accuracy and generalization ability.
+
+```{r}
+# Making predictions on the training set
+prediction_negative_train <- predict(negative_forward_model, newdata = negative_train_data)
+mse_negative_train <- mse(negative_train_data$negative_ratings, prediction_negative_train)
+mae_negative_train <- mae(negative_train_data$negative_ratings, prediction_negative_train)
+rmse_negative_train <- rmse(negative_train_data$negative_ratings, prediction_negative_train)
+
+# Making predictions on the testing set
+prediction_negative_test <- predict(negative_forward_model, newdata = negative_test_data)
+
+mse_negative_test <- mse(negative_test_data$negative_ratings, prediction_negative_test)
+mae_negative_test <- mae(negative_test_data$negative_ratings, prediction_negative_test)
+rmse_negative_test<- rmse(negative_test_data$negative_ratings, prediction_negative_test)
+
+# Print the errors
+print(paste("Training Root Mean Squared Error (RMSE) with Linear Regression Model:", rmse_negative_train))
+print(paste("Training Mean Squared Error (MSE) with Linear Regression Model:", mse_negative_train))
+print(paste("Training Mean Absolute Error (MAE) with Linear Regression Model:", mae_negative_train))
+
+print(paste("Testing Root Mean Squared Error (RMSE) with Linear Regression Model:", rmse_negative_test))
+print(paste("Testing Mean Squared Error (MSE) with Linear Regression Model:", mse_negative_test))
+print(paste("Testing Mean Absolute Error (MAE) with Linear Regression Model:", mae_negative_test))
+```
+- The RMSE and MAE are similar for both training and testing data, indicating the model has a consistent performance and is generalizing well without overfitting.
+- The fact that the RMSE and MAE are very close in value suggests that there are not many extreme errors skewing the error metrics, which is a good sign of model performance.
+- The MSE, which is the square of the RMSE, is a measure that gives greater weight to larger errors. The closeness in value between MSE and RMSE further indicates the absence of large errors in the model's predictions.
+
+**Conclusion**:
+The performance metrics suggest that the model has a moderate prediction error when estimating `negative_ratings`. The low difference between training and testing errors suggests that the model is stable and has not overfitted the training data. Despite the model's reasonable performance on these metrics, the diagnostic plots indicated potential issues with the normality of residuals and heteroscedasticity, which could affect the model's reliability. These issues should be considered alongside the performance metrics when evaluating model quality.
+
+#### Result
+
+**Coefficient Plot:** The coefficient plot provided visualizes the estimated coefficients of the top 15 predictors from a linear regression model, ranked by their absolute value. Each point on the plot represents the estimated effect size of a predictor variable, and the horizontal lines indicate the standard errors, giving a sense of the precision of these estimates.
+
+```{r}
+# Prepare the Model Data:
+# Converts the linear regression model into a tidy data frame. This data frame includes a row for each model predictor, with columns for estimates, standard errors, and other statistics.
+
+tidied_model <- tidy(negative_forward_model)
+# Exclude the intercept from the tidied model summary
+tidied_model <- tidied_model %>% filter(!term %in% c("(Intercept)", "pos_rate", "positive_ratings"))
+
+ # Order coefficients by their absolute values
+tidied_model$absolute_estimate <- abs(tidied_model$estimate)
+top_coefficients <- tidied_model[order(-tidied_model$absolute_estimate), ][1:15, ]
+
+# Plot the top 10 coefficients based on absolute value
+ggplot(top_coefficients, aes(x = reorder(term, absolute_estimate), y = estimate)) +
+  geom_point() +
+  geom_errorbar(aes(ymin = estimate - std.error, ymax = estimate + std.error), width = 0.2) +
+  theme_minimal() +
+  coord_flip() +
+  labs(x = "Predictors", y = "Estimated Coefficients",
+       title = "Top 15 Coefficients of the Linear Regression Model")
+```
+- **Accounting**: Has the largest negative coefficient, suggesting a strong negative association with negative ratings; as the presence or level of "Accounting" increases, negative ratings significantly decrease.
+- **Documentary**, **Software Training**, **Valve Anti-Cheat enabled**, **Photo Editing**: These predictors have positive coefficients, indicating that as they increase, negative ratings increase as well.
+- **Game Development**: Exhibits a negative coefficient, implying that higher values of "Game Development" are associated with a decrease in negative ratings.
+- **Steam Trading Cards**, **Free to Play**: These features have a positive association with negative ratings.
+- **Web Publishing**, **Education**: Show negative coefficients, suggesting a decrease in negative ratings as these predictors increase.
+- **SteamVR Collectibles**, **Multi-player**, **VR Support**: Have smaller positive effects on negative ratings.
+- **In-App Purchases**, **Local Multi-Player**: Have negative coefficients, indicating an inverse relationship with negative ratings.
+
+The standard errors in this plot are quite small for most coefficients, suggesting that the estimates are precise. The plot is a good tool to quickly visualize which features may be important for the prediction of negative ratings and their respective confidence intervals.
+
+The direction and magnitude of these coefficients can inform stakeholders about which features correlate with user satisfaction or dissatisfaction. However, it is crucial to remember that correlation does not imply causation, and these results should be used as one piece of the puzzle in understanding the factors influencing negative ratings.
+
+## 3. Which general factors are associated with the highest average playtime?
+
+#### Correlation Analysis
+
+**Objective**: Identifies variables that significantly correlate with average playtime. Aims to streamline the data to include only the variables that have a significant correlation with average playtime. This helps in identifying the key factors that could be predictive of or associated with higher average playtime, which is essential for building a predictive model or for focusing on areas of improvement or analysis.
+
+```{r}
+# Subset the data to include only the variables we are interested in, excluding 'appid' and 'negative_ratings'
+playtime <- select(nonzeroPlaytime, -c(appid, negative_ratings))
+
+# Compute correlations between 'average_playtime' and each numeric variable in the dataset
+# Skip variables with a standard deviation of zero as they are constant and cannot be correlated
+playtime_correlations <- sapply(colnames(playtime[,sapply(playtime,is.numeric)]), 
+  function(var_name) { if (is.numeric(playtime[[var_name]]) && var_name != 'average_playtime') {
+    # Check if the standard deviation is not zero
+    if (sd(playtime[[var_name]], na.rm = TRUE) != 0) {
+      cor(playtime[[var_name]], playtime$average_playtime, use = "complete.obs", method = "pearson")  
+    } else {
+      NA  # Return NA for variables with a standard deviation of zero
+    }
+  }
+})
+
+# Discard any NAs that may have resulted from the previous step
+playtime_na_columns <- names(playtime_correlations)[is.na(playtime_correlations)]
+playtime_correlations_clean <- playtime_correlations[!is.na(playtime_correlations)]
+
+# Refine the dataset to include only variables with a valid correlation to average playtime
+playtime <- select(playtime, -all_of(playtime_na_columns))
+
+# Convert the list of correlations to a numeric vector for plotting
+playtime_correlations_numeric <- unlist(playtime_correlations_clean)
+
+# Create a bar plot of the correlations with positive ratings
+barplot(playtime_correlations_numeric, las=2, main="General Factors Correlation with Positive Ratings", col="blue", names.arg = names(playtime_correlations_numeric))
+```
+
+#### Model Preparation and Selection
+
+**Data Partitioning**: The purpose of this code is to partition the dataset into a training set and a testing set. The training set is used to build the model, and the testing set is used to evaluate its performance. This approach helps to assess how well the model is likely to perform on unseen data, thus giving an indication of its generalization ability.
+
+```{r}
+# Set a seed for random number generation to ensure that the results are reproducible
+set.seed(125) # Ensure reproducibility
+
+# Calculate the total number of rows in the 'playtime' dataset
+playtime_data_size <- nrow(playtime)
+
+# Calculate the number of rows that make up 70% of the dataset 
+playtime_train_size <- floor(0.7 * playtime_data_size)
+
+# Randomly select row indices for the training set based on the size calculated
+playtime_train_indices <- sample(seq_len(playtime_data_size), size = playtime_train_size)
+
+# Use the selected indices to create the training dataset
+playtime_train_data <- playtime[playtime_train_indices, ]
+
+# Use the remaining indices to create the testing dataset
+playtime_test_data <- playtime[-playtime_train_indices, ]
+```
+
+#### Model Building
+
+**Objective**: Starts with an intercept-only model and progresses
+through forward stepwise regression to select the most significant
+predictors of positive ratings. This iterative process helps in building
+a parsimonious model that explains the data well without overfitting.
+
+```{r}
+# Build linear regression models: Starting with an intercept-only model, then using all predictors
+# Forward stepwise regression is used to select significant predictors
+
+# Define the intercept-only model, which includes no predictors.
+playtime_intercept_model <- lm(average_playtime ~ 1, data=playtime_train_data)
+
+# Define the full model with all possible predictors.
+playtime_all_model <- lm(average_playtime ~ ., data=playtime_train_data)
+
+# Conduct forward stepwise regression starting from the intercept-only model and considering all predictors.
+playtime_forward_model <- step(playtime_intercept_model, direction='forward', scope=formula(playtime_all_model), trace=0)
+
+# Output the summary of the final model to view its details, including estimated coefficients, statistical significance, etc.
+summary(playtime_forward_model)
+```
+
+This output of linear regression model summary that predicts `average_playtime` based on various features, likely related to video games or software on a platform like Steam. Let’s go over the model's results:
+
+**Coefficients**: Positive coefficients (e.g., `Steam Trading Cards`, `price`, `pos_rate`) suggest that as the predictor increases, the average playtime increases. Negative coefficients (e.g., `Free to Play`, `Casual`) suggest that as the predictor increases, the average playtime decreases.
+
+**Residuals**: Residuals are the differences between observed and predicted values. The residuals range from -6.8521 to 6.7538, with the median close to zero. However, the range suggests some large discrepancies between predicted and actual values.
+
+*Model Fit**:
+   - `Multiple R-squared` of 0.2744 indicates that around 27.44% of the variability in average playtime is explained by the model.
+   - `Adjusted R-squared` of 0.2696 is a bit lower, adjusting for the number of predictors.
+   - The `F-statistic` and its associated p-value suggest the model is statistically significant.
+
+**Conclusion**: The model provides insights into factors that are associated with how long players engage with games. The results should be interpreted in the context of the gaming industry. For example, features that increase playtime might be targets for developers looking to increase user engagement. Given the significance and the signs of the coefficients, stakeholders in game development and marketing can use these insights to focus on features that may increase user engagement and playtime.
+
+#### Multicollinearity Assessment - Variance Inflation Factor (VIF):
+
+**Objective**: VIF assesses multicollinearity by measuring how much the
+variance of an estimated regression coefficient increases if predictors
+are correlated. A VIF value above 5 indicates high multicollinearity,
+suggesting that the predictor may be redundant due to linear
+relationships with other predictors. Examining VIF helps in diagnosing
+potential issues with the model related to multicollinearity.
+
+**Result**: All VIF values are below 5, which suggests that
+multicollinearity is not a severe problem for every variables in the
+model.
+
+```{r}
+# View Variance Inflation Factor (VIF) for the final model
+vif(playtime_forward_model)
+```
+
+#### Diagnostic Tests and Model Evaluation - Residual Analysis:
+
+The diagnostic plots provided are common tools used in regression analysis to evaluate the assumptions of the linear model. These include the normality of residuals, homoscedasticity (equal variance of residuals), and the influence of individual data points. Here's an explanation of each plot and what it indicates about the model:
+
+**Normal Q-Q Plot**: This plot assesses whether the residuals are normally distributed. The points closely follow the red reference line in the center of the distribution but deviate at the ends, particularly for the upper quantiles. This indicates that the residuals have heavier tails than a normal distribution would suggest, hinting at the presence of outliers or that the normal distribution is not an appropriate model for the residuals.
+
+```{r}
+# Normality of Residuals
+
+# Extract residuals
+playtime_res <- residuals(playtime_forward_model)
+# QQ plot for normality check
+qqnorm(playtime_res)
+# Add reference line to QQ plot
+qqline(playtime_res, col = "red")
+```
+
+**Residuals vs. Fitted Values Plot**: This plot checks for homoscedasticity, where we expect residuals to have constant variance across fitted values. The spread of residuals appears to fan out with the increase in fitted values, indicating potential heteroscedasticity. This suggests that the variance of residuals is not constant and that the model's predictive accuracy varies across different levels of the independent variables.
+
+```{r}
+# Homoscedasticity
+
+# Plot residuals vs. fitted values for homoscedasticity check
+plot(fitted(playtime_forward_model), playtime_res, xlab = "Fitted Values", ylab = "Residuals", main = "Residuals vs. Fitted Values")
+
+# Add horizontal line at 0
+abline(h = 0, col = "red")
+```
+
+**Leverage Values Plot**: This plot identifies influential observations that may have a disproportionate effect on the model. Most points are clustered near the bottom of the plot, indicating low leverage. However, there are a few observations with higher leverage, which might be influential. These should be investigated to ensure they are not unduly affecting the model's estimates.
+
+```{r}
+# Plot leverage values to identify influential observations
+plot(hatvalues(playtime_forward_model), main="Leverage Values")
+```
+
+**Performance Metrics**: The model's performance is assessed using three key metrics: Mean Squared Error (MSE), Mean Absolute Error (MAE), and Root Mean Squared Error (RMSE). These metrics are calculated for both the training data and the testing data to understand the model's predictive accuracy and generalization ability.
+
+
+```{r}
+# Making predictions on the training set
+prediction_playtime_train <- predict(playtime_forward_model, newdata = playtime_train_data)
+mse_playtime_train <- mse(playtime_train_data$average_playtime, prediction_playtime_train)
+mae_playtime_train <- mae(playtime_train_data$average_playtime, prediction_playtime_train)
+rmse_playtime_train <- rmse(playtime_train_data$average_playtime, prediction_playtime_train)
+
+# Making predictions on the testing set
+prediction_playtime_test <- predict(playtime_forward_model, newdata = playtime_test_data)
+
+mse_playtime_test <- mse(playtime_test_data$average_playtime, prediction_playtime_test)
+mae_playtime_test <- mae(playtime_test_data$average_playtime, prediction_playtime_test)
+rmse_playtime_test<- rmse(playtime_test_data$average_playtime, prediction_playtime_test)
+
+# Print the errors
+print(paste("Training Root Mean Squared Error (RMSE) with Linear Regression Model:", rmse_playtime_train))
+print(paste("Training Mean Squared Error (MSE) with Linear Regression Model:", mse_playtime_train))
+print(paste("Training Mean Absolute Error (MAE) with Linear Regression Model:", mae_playtime_train))
+
+print(paste("Testing Root Mean Squared Error (RMSE) with Linear Regression Model:", rmse_playtime_test))
+print(paste("Testing Mean Squared Error (MSE) with Linear Regression Model:", mse_playtime_test))
+print(paste("Testing Mean Absolute Error (MAE) with Linear Regression Model:", mae_playtime_test))
+```
+
+- The fact that the RMSE and MSE for both training and testing data are relatively close suggests that the model is consistent and is not overfitting the training data.
+- The similarity of the training and testing errors in terms of MAE and RMSE indicates good generalization of the model to unseen data.
+  
+**Conclusion**:
+- The model seems to predict average playtime with moderate accuracy, with the average errors (both RMSE and MAE) being around 1-1.5 hours. 
+- The values of the metrics suggest that the typical prediction error for `average_playtime` falls within this range. Depending on the context and how playtime is distributed, this may or may not be an acceptable error margin.
+- Considering the diagnostic plots showed potential issues with normality and homoscedasticity, these performance metrics should be interpreted with some caution. The model might benefit from further refinement or the use of more complex modeling techniques to better handle the observed issues in the data.
+
+#### Result
+
+**Coefficient Plot:** The coefficient plot provided visualizes the estimated coefficients of the top 15 predictors from a linear regression model, ranked by their absolute value. Each point on the plot represents the estimated effect size of a predictor variable, and the horizontal lines indicate the standard errors, giving a sense of the precision of these estimates.
+
+```{r}
+# Prepare the Model Data:
+# Converts the linear regression model into a tidy data frame. This data frame includes a row for each model predictor, with columns for estimates, standard errors, and other statistics.
+
+tidied_model <- tidy(playtime_forward_model)
+# Exclude the intercept from the tidied model summary
+tidied_model <- tidied_model %>% filter(term != "(Intercept)")
+
+ # Order coefficients by their absolute values
+tidied_model$absolute_estimate <- abs(tidied_model$estimate)
+top_coefficients <- tidied_model[order(-tidied_model$absolute_estimate), ][1:15, ]
+
+# Plot the top 10 coefficients based on absolute value
+ggplot(top_coefficients, aes(x = reorder(term, absolute_estimate), y = estimate)) +
+  geom_point() +
+  geom_errorbar(aes(ymin = estimate - std.error, ymax = estimate + std.error), width = 0.2) +
+  theme_minimal() +
+  coord_flip() +
+  labs(x = "Predictors", y = "Estimated Coefficients",
+       title = "Top 15 Coefficients of the Linear Regression Model")
+```
+
+- **Audio Production**: Has a significant negative coefficient, suggesting that games with audio production features may have less average playtime.
+- **Education**: Also has a negative coefficient, which may imply that educational games have shorter average playtime.
+- **Web Publishing**, **SteamVR Collectibles**: These features have negative associations with average playtime.
+- **Steam Trading Cards**: This feature has a positive effect, indicating that games with trading cards tend to have longer playtimes.
+- **pos_rate**: A positive coefficient here suggests that games with higher positive ratings correlate with longer playtimes.
+- **Includes Source SDK**, **Free to Play**: These have negative coefficients, with "Free to Play" showing a notable negative impact on playtime, suggesting such games might be played less on average.
+- **In-App Purchases**: Interestingly, this has a positive coefficient, indicating that games offering in-app purchases may be associated with longer playtimes.
+- **Steam Turn Notifications**: Has a slight negative effect.
+- **Massively Multiplayer**: Has a positive coefficient, suggesting that games in this genre are associated with longer playtimes.
+- **Early Access**, **Local Multi-Player**: These features seem to decrease the average playtime based on the negative coefficients.
+- **Valve Anti-Cheat enabled**, **Violent**: Have the smallest negative coefficients, indicating a minor decrease in playtime.
+
+Summary:
+- Features such as `Steam Trading Cards` and `Massively Multiplayer` are associated with increased playtime, which could be a focus for developers aiming to increase engagement.
+- The negative impact of `Free to Play` and `Audio Production` on playtime could warrant further investigation to understand why these features correlate with less engagement.
+- The significance of features like `In-App Purchases` implies that monetization strategies may be aligned with engagement strategies.
+- This analysis is useful for game developers, publishers, and marketers who wish to understand what factors might contribute to longer or shorter gameplay experiences.
+
+## 4. Which tags are associated with the highest positive rating?
+
+#### Merging Datasets:
+
+**Objective**: To integrate the normalized TagData with the SteamData,
+specifically focusing on game identifiers (appid) and their
+corresponding average playtime. This step combines all relevant
+information into a single dataset, enabling a comprehensive analysis of
+how different tags (from TagData) relate to the average playtime of
+games (from SteamData). It ensures that the analysis can proceed with a
+full picture of the data.
+
+```{r}
+# Create a subset of 'nonZeroPositiveData' that includes 'appid' and 'positive_ratings'. This ensures we have the unique identifiers and the associated positive ratings for each game.
+positive_col <- nonZeroPositiveData[, c("appid", "positive_ratings"), drop = FALSE]
+
+# Merge the subset of game data with positive ratings ('positive_col') with the tag data ('normalizedTagData'). Use 'appid' as the common key to join these datasets. The parameter 'all.x = TRUE' ensures that all entries from 'positive_col' are kept in the resulting dataset, even if there is no corresponding entry in 'normalizedTagData'.
+positiveTag <- merge(positive_col, normalizedTagData, by = "appid", all.x = TRUE)
+
+# Remove the 'appid' column from the merged dataset 'positiveTag' as it is no longer needed for the subsequent analysis. We are focusing on the relationship between positive ratings and tags, not on the app identifiers themselves.
+positiveTag <- select(positiveTag, -c(appid))
+```
+
+#### Correlation Analysis
+
+**Objective**: Identifies variables that significantly correlate with positive ratings. Aims to streamline the data to include only the variables that have a significant correlation with positive ratings. This helps in identifying the key factors that could be predictive of or associated with higher positive ratings, which is essential for building a predictive model or for focusing on areas of improvement or analysis.
+
+```{r}
+# Compute correlations between 'positive_ratings' and each numeric variable in the dataset
+# Skip variables with a standard deviation of zero as they are constant and cannot be correlated
+positiveTag_correlations <- sapply(colnames(positiveTag[,sapply(positiveTag,is.numeric)]), 
+  function(var_name) { if (is.numeric(positiveTag[[var_name]]) && var_name != 'positive_ratings') {
+    # Check if the standard deviation is not zero
+    if (sd(positiveTag[[var_name]], na.rm = TRUE) != 0) {
+      cor(positiveTag[[var_name]], positiveTag$positive_ratings, use = "complete.obs", method = "pearson") 
+    } else {
+      NA  # Return NA for variables with a standard deviation of zero
+    }
+  }
+})
+
+# Discard any NAs that may have resulted from the previous step
+positiveTag_na_columns <- names(positiveTag_correlations)[is.na(positiveTag_correlations)]
+positiveTag_correlations_clean <- positiveTag_correlations[!is.na(positiveTag_correlations)]
+
+# Refine the dataset to include only variables with a valid correlation to positive ratings
+positiveTag <- select(positiveTag, -all_of(positiveTag_na_columns))
+
+# Convert the list of clean correlations into a numeric vector for further analysis and visualization.
+positiveTag_correlations_numeric <- unlist(positiveTag_correlations_clean)
+
+# Determine the lower bound for significant correlations by taking the 80th percentile of the absolute values.
+lower_Corr <- quantile(abs(positiveTag_correlations_numeric), 0.8)
+
+# Identify columns with correlation below this threshold as they are less relevant for predicting positive ratings.
+irr_columns <- names(positiveTag_correlations_numeric)[abs(positiveTag_correlations_numeric) < lower_Corr]
+
+# Filter out the irrelevant columns from 'positiveTag' to refine the dataset.
+existing_irr_columns <- intersect(irr_columns, names(positiveTag))
+
+# Remove Variables that have a lower correlation with dependent variable
+positiveTag <- select(positiveTag, -all_of(existing_irr_columns))
+
+# Remove these irrelevant columns from the numeric vector of correlations.
+positiveTag_correlations_numeric <- positiveTag_correlations_numeric[!names(positiveTag_correlations_numeric) %in% irr_columns]
+
+# Create a bar plot to visualize the correlations between the variables and positive ratings.
+# This plot will display only the variables with significant correlations.
+barplot(positiveTag_correlations_numeric, las=2, main="Correlation with Shares", col="blue", names.arg = names(positiveTag_correlations_numeric))
+```
+
+#### Model Preparation and Selection
+
+**Data Partitioning**: Data is split into training and testing sets.
+This is a standard approach in machine learning and statistical modeling
+to validate the model's performance on unseen data.
+
+```{r}
+# Set a seed for random number generation to ensure that the results are reproducible
+set.seed(126) # Ensure reproducibility
+
+# Calculate the total number of rows in the 'positiveTag' dataset
+positiveTag_data_size <- nrow(positiveTag)
+
+# Calculate the number of rows that make up 70% of the dataset
+positiveTag_train_size <- floor(0.7 * positiveTag_data_size)
+
+# Randomly select row indices for the training set based on the size calculated
+positiveTag_train_indices <- sample(seq_len(positiveTag_data_size), size = positiveTag_train_size)
+
+# Use the selected indices to create the training dataset
+positiveTag_train_data <- positiveTag[positiveTag_train_indices, ]
+
+# Use the remaining indices to create the testing dataset
+positiveTag_test_data <- positiveTag[-positiveTag_train_indices, ]
+```
+
+#### Model Building
+
+**Objective**: Starts with an intercept-only model and progresses
+through forward stepwise regression to select the most significant
+predictors of positive ratings. This iterative process helps in building
+a parsimonious model that explains the data well without overfitting.
+
+```{r}
+# Build linear regression models: Starting with an intercept-only model, then using all predictors
+# Forward stepwise regression is used to select significant predictors
+
+# Define the intercept-only model, which includes no predictors.
+positiveTag_intercept_model <- lm(positive_ratings ~ 1, data=positiveTag_train_data)
+
+# Define the full model with all possible predictors.
+positiveTag_all_model <- lm(positive_ratings ~ ., data=positiveTag_train_data)
+
+# Conduct forward stepwise regression starting from the intercept-only model and considering all predictors.
+positiveTag_forward_model <- step(positiveTag_intercept_model, direction='forward', scope=formula(positiveTag_all_model), trace=0)
+
+# Output the summary of the final model to view its details, including estimated coefficients, statistical significance, etc.
+summary(positiveTag_forward_model)
+```
+
+The summary of the linear regression model provides an extensive list of game tags and their association with positive ratings. Here is an interpretation of the results:
+
+**Coefficients**: The `Estimate` column gives the change in the dependent variable (`positive_ratings`) for a one-unit change in the predictor (tag), holding all other predictors constant. Positive coefficients indicate a positive association with positive ratings, and negative coefficients indicate a negative association.
+
+**Tags with Highest Positive Association**: `free_to_play` and `fps` (first-person shooter) have high positive coefficients, indicating that games with these tags are likely to have higher positive ratings. Other tags such as `great_soundtrack`, `strategy`, `open_world`, and `multiplayer` also show a significant positive association with positive ratings.
+
+**Tags with Negative Association**: `difficult`, `X2d` (2-dimensional gameplay), `tactical`, and `co_op` have negative coefficients, suggesting that these tags might be related to lower positive ratings. This might indicate that games that are tagged as difficult or tactical, for instance, have a niche audience or could be less universally appealing.
+
+**Model Fit**:
+   - `Multiple R-squared` of 0.1943 indicates that approximately 19.43% of the variability in positive ratings can be explained by the model, which is relatively low but not uncommon for data with high variability like user ratings.
+   - The `Adjusted R-squared` value is slightly lower, taking into account the number of predictors, which means that the explanatory power of the model is reduced when the number of tags is considered.
+
+**Conclusion**: The model indicates which tags are most strongly associated with positive ratings on the platform. This can help game developers and marketers understand what features or themes correlate with higher user satisfaction. However, since the R-squared values are not very high, there is a considerable amount of variability in positive ratings that is not explained by the tags alone. Other factors not included in the model may also significantly influence positive ratings.
+
+#### Multicollinearity Assessment - Variance Inflation Factor (VIF):
+
+**Objective**: VIF assesses multicollinearity by measuring how much the
+variance of an estimated regression coefficient increases if predictors
+are correlated. A VIF value above 5 indicates high multicollinearity,
+suggesting that the predictor may be redundant due to linear
+relationships with other predictors. Examining VIF helps in diagnosing
+potential issues with the model related to multicollinearity.
+
+**Result**: All VIF values are below 5, which suggests that
+multicollinearity is not a severe problem for every variables in the
+model.
+
+```{r}
+# View Variance Inflation Factor (VIF) for the final model
+vif(positiveTag_forward_model)
+```
+
+#### Diagnostic Tests and Model Evaluation - Residual Analysis:
+
+The diagnostic plots provided are common tools used in regression analysis to evaluate the assumptions of the linear model. These include the normality of residuals, homoscedasticity (equal variance of residuals), and the influence of individual data points. Here's an explanation of each plot and what it indicates about the model:
+
+**Normal Q-Q Plot**: This plot assesses the normality of the residuals. Points following closely to the red line suggest that the residuals are normally distributed. A pattern where points deviate significantly from the line indicates non-normality. The tails of the plot, which veer off from the red line, suggest that the data may have outliers or that the residuals have a non-normal distribution.
+
+```{r}
+# Normality of Residuals
+
+# Extract residuals
+positiveTag_res <- residuals(positiveTag_forward_model)
+# QQ plot for normality check
+qqnorm(positiveTag_res)
+# Add reference line to QQ plot
+qqline(positiveTag_res, col = "red")
+```
+
+
+**Residuals vs. Fitted Values Plot**: It's ideal for the points to be evenly scattered around the horizontal line at zero, indicating homoscedasticity. In this plot, we can see a funnel shape, suggesting that the variance of the residuals increases as the fitted values increase.
+
+```{r}
+# Homoscedasticity
+
+# Plot residuals vs. fitted values for homoscedasticity check
+plot(fitted(positiveTag_forward_model), positiveTag_res, xlab = "Fitted Values", ylab = "Residuals", main = "Residuals vs. Fitted Values")
+
+# Add horizontal line at 0
+abline(h = 0, col = "red")
+```
+
+**Leverage Values Plot**: Leverage is a measure of how far away the independent variable values of an observation are from those of the other observations. In this plot, most data points cluster to the left, indicating low leverage.
+
+```{r}
+# Plot leverage values to identify influential observations
+plot(hatvalues(positiveTag_forward_model), main="Leverage Values")
+```
+
+**Performance Metrics**: The model's performance is assessed using three key metrics: Mean Squared Error (MSE), Mean Absolute Error (MAE), and Root Mean Squared Error (RMSE). These metrics are calculated for both the training data and the testing data to understand the model's predictive accuracy and generalization ability.
+
+```{r}
+# Making predictions on the training set
+prediction_positiveTag_train <- predict(positiveTag_forward_model, newdata = positiveTag_train_data)
+mse_positiveTag_train <- mse(positiveTag_train_data$positive_ratings, prediction_positiveTag_train)
+mae_positiveTag_train <- mae(positiveTag_train_data$positive_ratings, prediction_positiveTag_train)
+rmse_positiveTag_train <- rmse(positiveTag_train_data$positive_ratings, prediction_positiveTag_train)
+
+# Making predictions on the testing set
+prediction_positiveTag_test <- predict(positiveTag_forward_model, newdata = positiveTag_test_data)
+
+mse_positiveTag_test <- mse(positiveTag_test_data$positive_ratings, prediction_positiveTag_test)
+mae_positiveTag_test <- mae(positiveTag_test_data$positive_ratings, prediction_positiveTag_test)
+rmse_positiveTag_test<- rmse(positiveTag_test_data$positive_ratings, prediction_positiveTag_test)
+
+# Print the errors
+print(paste("Training Root Mean Squared Error (RMSE) with Linear Regression Model:", rmse_positiveTag_train))
+print(paste("Training Mean Squared Error (MSE) with Linear Regression Model:", mse_positiveTag_train))
+print(paste("Training Mean Absolute Error (MAE) with Linear Regression Model:", mae_positiveTag_train))
+
+print(paste("Testing Root Mean Squared Error (RMSE) with Linear Regression Model:", rmse_positiveTag_test))
+print(paste("Testing Mean Squared Error (MSE) with Linear Regression Model:", mse_positiveTag_test))
+print(paste("Testing Mean Absolute Error (MAE) with Linear Regression Model:", mae_positiveTag_test))
+```
+
+- The training RMSE of approximately 1.368 suggests that on average, the model's predictions are around 1.368 units away from the true values on the training set.
+- The testing RMSE is very close to the training RMSE at approximately 1.377, indicating the model generalizes well and there is no significant overfitting.
+- The MSE and MAE follow a similar pattern, with values slightly higher on the testing set compared to the training set, which is typical in model assessments.
+
+**Conclusion**:
+The similarity between the training and testing errors suggests that the model has generalized well from the training data to unseen data. However, it's always important to consider these metrics in the context of the specific problem domain and what levels of error are acceptable for the particular application of the model.
+
+#### Result
+
+**Coefficient Plot:** The coefficient plot provided visualizes the estimated coefficients of the top 15 predictors from a linear regression model, ranked by their absolute value. Each point on the plot represents the estimated effect size of a predictor variable, and the horizontal lines indicate the standard errors, giving a sense of the precision of these estimates.
+
+```{r}
+# Prepare the Model Data:
+# Converts the linear regression model into a tidy data frame. This data frame includes a row for each model predictor, with columns for estimates, standard errors, and other statistics.
+tidied_model <- tidy(positiveTag_forward_model)
+
+# Exclude the intercept from the tidied model summary
+tidied_model <- tidied_model %>% filter(term != "(Intercept)")
+
+ # Order coefficients by their absolute values
+tidied_model$absolute_estimate <- abs(tidied_model$estimate)
+top_coefficients <- tidied_model[order(-tidied_model$absolute_estimate), ][1:15, ]
+
+# Plot the top 10 coefficients based on absolute value
+ggplot(top_coefficients, aes(x = reorder(term, absolute_estimate), y = estimate)) +
+  geom_point() +
+  geom_errorbar(aes(ymin = estimate - std.error, ymax = estimate + std.error), width = 0.2) +
+  theme_minimal() +
+  coord_flip() +
+  labs(x = "Predictors", y = "Estimated Coefficients",
+       title = "Top 15 Coefficients of the Linear Regression Model")
+```
+
+- **High Positive Impact**: The tags at the top, like `free_to_play`, have a large positive coefficient and a confidence interval that does not include zero. This indicates that these features are strongly associated with higher values of the response variable, and we can be fairly confident about this positive relationship.
+
+- **Moderate Positive Impact**: Tags like `multiplayer` and `sandbox` have positive coefficients but smaller than the top tags, suggesting these features are also associated with an increase in the response variable, albeit to a lesser extent.
+
+- **Uncertain Impact**: Tags such as `tactical` and `co_op` have smaller positive coefficients, and although their confidence intervals don't include zero, the intervals are relatively wide, indicating less certainty in the precise effect size.
+
+- **Negative Impact**: The `survival` tag has a negative coefficient, suggesting an inverse relationship with the response variable. The fact that its confidence interval is far from zero strengthens our confidence that this negative association is real in the population.
+
+- **Negligible or No Impact**: Tags with very short horizontal lines close to zero, such as `funny`, `horror`, and `visual_novel`, have a negligible or no clear association with the response variable. Their confidence intervals are likely to include zero, suggesting that any observed association in the sample may not exist in the population.
+
+
+## 5. Which tags are associated with the highest negative rating?
+
+#### Merging Datasets:
+
+**Objective**: To integrate the normalized TagData with the SteamData,
+specifically focusing on game identifiers (appid) and their
+corresponding average playtime. This step combines all relevant
+information into a single dataset, enabling a comprehensive analysis of
+how different tags (from TagData) relate to the average playtime of
+games (from SteamData). It ensures that the analysis can proceed with a
+full picture of the data.
+
+```{r}
+# Create a subset of 'nonZeroNegativeData' that includes 'appid' and 'negative_ratings'. This ensures we have the unique identifiers and the associated negative ratings for each game.
+negative_col <- nonZeroNegativeData[, c("appid", "negative_ratings"), drop = FALSE]
+
+# Merge the subset of game data with negative ratings ('negative_col') with the tag data ('normalizedTagData'). Use 'appid' as the common key to join these datasets. The parameter 'all.x = TRUE' ensures that all entries from 'negative_col' are kept in the resulting dataset, even if there is no corresponding entry in 'normalizedTagData'.
+negativeTag <- merge(negative_col, normalizedTagData, by = "appid", all.x = TRUE)
+
+# Remove the 'appid' column from the merged dataset 'negativeTag' as it is no longer needed for the subsequent analysis. We are focusing on the relationship between negative ratings and tags, not on the app identifiers themselves.
+negativeTag <- select(negativeTag, -c(appid))
+```
+
+#### Correlation Analysis
+
+**Objective**: Identifies variables that significantly correlate with negative ratings. Aims to streamline the data to include only the variables that have a significant correlation with negative ratings. This helps in identifying the key factors that could be predictive of or associated with higher negative ratings, which is essential for building a predictive model or for focusing on areas of improvement or analysis.
+
+```{r}
+# Compute correlations between 'negative_ratings' and each numeric variable in the dataset
+# Skip variables with a standard deviation of zero as they are constant and cannot be correlated
+negativeTag_correlations <- sapply(colnames(negativeTag[,sapply(negativeTag,is.numeric)]), 
+  function(var_name) { if (is.numeric(negativeTag[[var_name]]) && var_name != 'negative_ratings') {
+    # Check if the standard deviation is not zero
+    if (sd(negativeTag[[var_name]], na.rm = TRUE) != 0) {
+      cor(negativeTag[[var_name]], negativeTag$negative_ratings, use = "complete.obs", method = "pearson") 
+    } else {
+      NA  # Return NA for variables with a standard deviation of zero
+    }
+  }
+})
+
+# Discard any NAs that may have resulted from the previous step
+negativeTag_na_columns <- names(negativeTag_correlations)[is.na(negativeTag_correlations)]
+negativeTag_correlations_clean <- negativeTag_correlations[!is.na(negativeTag_correlations)]
+
+# Refine the dataset to include only variables with a valid correlation to negative ratings
+negativeTag <- select(negativeTag, -all_of(negativeTag_na_columns))
+
+# Convert the list of clean correlations into a numeric vector for further analysis and visualization.
+negativeTag_correlations_numeric <- unlist(negativeTag_correlations_clean)
+
+# Determine the lower bound for significant correlations by taking the 80th percentile of the absolute values.
+lower_Corr <- quantile(abs(negativeTag_correlations_numeric), 0.8)
+
+# Identify columns with correlation below this threshold as they are less relevant for predicting negative ratings.
+irr_columns <- names(negativeTag_correlations_numeric)[abs(negativeTag_correlations_numeric) < lower_Corr]
+
+# Filter out the irrelevant columns from 'negativeTag' to refine the dataset.
+existing_irr_columns <- intersect(irr_columns, names(negativeTag))
+
+# Remove Variables that have a lower correlation with dependent variable
+negativeTag <- select(negativeTag, -all_of(existing_irr_columns))
+
+# Remove these irrelevant columns from the numeric vector of correlations.
+negativeTag_correlations_numeric <- negativeTag_correlations_numeric[!names(negativeTag_correlations_numeric) %in% irr_columns]
+
+# Create a bar plot to visualize the correlations between the variables and negative ratings.
+# This plot will display only the variables with significant correlations.
+barplot(negativeTag_correlations_numeric, las=2, main="Correlation with Shares", col="blue", names.arg = names(negativeTag_correlations_numeric))
+```
+
+#### Model Preparation and Selection
+
+**Data Partitioning**: The purpose of this code is to partition the dataset into a training set and a testing set. The training set is used to build the model, and the testing set is used to evaluate its performance. This approach helps to assess how well the model is likely to perform on unseen data, thus giving an indication of its generalization ability.
+
+```{r}
+# Set a seed for random number generation to ensure that the results are reproducible
+set.seed(127) # Ensure reproducibility
+
+# Calculate the total number of rows in the 'negativeTag' dataset
+negativeTag_data_size <- nrow(negativeTag)
+
+# Calculate the number of rows that make up 70% of the dataset
+negativeTag_train_size <- floor(0.7 * negativeTag_data_size)
+
+# Randomly select row indices for the training set based on the size calculated
+negativeTag_train_indices <- sample(seq_len(negativeTag_data_size), size = negativeTag_train_size)
+
+# Use the selected indices to create the training dataset
+negativeTag_train_data <- negativeTag[negativeTag_train_indices, ]
+
+# Use the remaining indices to create the testing dataset
+negativeTag_test_data <- negativeTag[-negativeTag_train_indices, ]
+```
+
+#### Model Building
+
+**Objective**: Starts with an intercept-only model and progresses
+through forward stepwise regression to select the most significant
+predictors of negative ratings. This iterative process helps in building
+a parsimonious model that explains the data well without overfitting.
+
+```{r}
+# Build linear regression models: Starting with an intercept-only model, then using all predictors
+# Forward stepwise regression is used to select significant predictors
+
+# Define the intercept-only model, which includes no predictors.
+negativeTag_intercept_model <- lm(negative_ratings ~ 1, data=negativeTag_train_data)
+
+# Define the full model with all possible predictors.
+negativeTag_all_model <- lm(negative_ratings ~ ., data=negativeTag_train_data)
+
+# Conduct forward stepwise regression starting from the intercept-only model and considering all predictors.
+negativeTag_forward_model <- step(negativeTag_intercept_model, direction='forward', scope=formula(negativeTag_all_model), trace=0)
+
+# Output the summary of the final model to view its details, including estimated coefficients, statistical significance, etc.
+summary(negativeTag_forward_model)
+```
+
+This output presents the summary of a linear regression model that predicts negative ratings based on a range of game tags (attributes). Let's interpret the key points from the summary:
+
+**Coefficients**: Each coefficient represents the estimated change in the response variable (negative ratings) for a one-unit increase in the predictor variable (tag), holding other predictors constant. Positive coefficients indicate a tag is associated with an increase in negative ratings, while negative coefficients indicate a decrease.
+- **free_to_play**: With a coefficient of about 465.87 and a highly significant p-value, free-to-play games are strongly associated with higher negative ratings.
+- **open_world**: Open-world games are also associated with higher negative ratings, given their coefficient of 457.46.
+- **strategy**, **adventure**, **horror**, **anime**, and **action**: These genres show a positive association with negative ratings, though less than free-to-play and open-world.
+- **difficult**: This has a negative coefficient, suggesting that more difficult games have fewer negative ratings, although this seems counterintuitive and might warrant further investigation into what 'difficult' means within the context of this data.
+- **funny**: This tag has a negative association with negative ratings, which could mean that games tagged as "funny" are less likely to receive negative ratings.
+
+**Overall Model Assessment**:
+- **Residual standard error**: Reflects the average distance that the observed values fall from the regression line. In this case, the value is 1.258.
+- **R-squared**: At 0.1638, this indicates that around 16.38% of the variability in negative ratings can be explained by the model. This is relatively low, suggesting other factors not included in the model may explain the remaining variability.
+- **F-statistic**: This tests whether at least one predictor variable has a non-zero coefficient. A very low p-value indicates that we can reject the null hypothesis that all of the regression coefficients are equal to zero.
+
+In summary, while some tags are strongly associated with negative ratings, the overall model explains a relatively small portion of the variance in negative ratings. This suggests that while tags can provide some insight into what might contribute to negative ratings, they do not tell the whole story, and other unaccounted-for factors may play a significant role.
+
+#### Multicollinearity Assessment - Variance Inflation Factor (VIF):
+
+**Objective**: VIF assesses multicollinearity by measuring how much the
+variance of an estimated regression coefficient increases if predictors
+are correlated. A VIF value above 5 indicates high multicollinearity,
+suggesting that the predictor may be redundant due to linear
+relationships with other predictors. Examining VIF helps in diagnosing
+potential issues with the model related to multicollinearity.
+
+**Result**: All VIF values are below 5, which suggests that
+multicollinearity is not a severe problem for every variables in the
+model.
+
+```{r}
+# View Variance Inflation Factor (VIF) for the final model
+vif(negativeTag_forward_model)
+```
+
+#### Diagnostic Tests and Model Evaluation - Residual Analysis:
+
+The diagnostic plots provided are common tools used in regression analysis to evaluate the assumptions of the linear model. These include the normality of residuals, homoscedasticity (equal variance of residuals), and the influence of individual data points. Here's an explanation of each plot and what it indicates about the model:
+
+**Normal Q-Q Plot**: The Normal Q-Q (quantile-quantile) plot is used to assess whether a set of data plausibly comes from some theoretical distribution such as a Normal distribution. In this plot, the points deviate from the line in the tails indicating that the distribution has heavier tails than the normal distribution, suggesting possible outliers or a non-normal distribution of the residuals.
+
+```{r}
+# Normality of Residuals
+
+# Extract residuals
+negativeTag_res <- residuals(negativeTag_forward_model)
+# QQ plot for normality check
+qqnorm(negativeTag_res)
+# Add reference line to QQ plot
+qqline(negativeTag_res, col = "red")
+```
+
+**Residuals vs. Fitted Values Plot**: In this plot, there seems to be a pattern where the variance of the residuals increases as the fitted values increase, which is an indication of heteroscedasticity. The fan shape suggests that the model might benefit from a transformation of variables or a different model to correct for the non-constant variance.
+
+```{r}
+# Homoscedasticity
+
+# Plot residuals vs. fitted values for homoscedasticity check
+plot(fitted(negativeTag_forward_model), negativeTag_res, xlab = "Fitted Values", ylab = "Residuals", main = "Residuals vs. Fitted Values")
+
+# Add horizontal line at 0
+abline(h = 0, col = "red")
+```
+
+**Leverage Plot**: The leverage plot identifies influential observations. In this plot, while most data points have low leverage, there are several points with higher leverage that may be unduly influencing the model's predictions.
+
+```{r}
+# Plot leverage values to identify influential observations
+plot(hatvalues(negativeTag_forward_model), main="Leverage Values")
+```
+
+**Performance Metrics**: The model's performance is assessed using three key metrics: Mean Squared Error (MSE), Mean Absolute Error (MAE), and Root Mean Squared Error (RMSE). These metrics are calculated for both the training data and the testing data to understand the model's predictive accuracy and generalization ability.
+
+```{r}
+# Making predictions on the training set
+prediction_negativeTag_train <- predict(negativeTag_forward_model, newdata = negativeTag_train_data)
+mse_negativeTag_train <- mse(negativeTag_train_data$negative_ratings, prediction_negativeTag_train)
+mae_negativeTag_train <- mae(negativeTag_train_data$negative_ratings, prediction_negativeTag_train)
+rmse_negativeTag_train <- rmse(negativeTag_train_data$negative_ratings, prediction_negativeTag_train)
+
+# Making predictions on the testing set
+prediction_negativeTag_test <- predict(negativeTag_forward_model, newdata = negativeTag_test_data)
+
+mse_negativeTag_test <- mse(negativeTag_test_data$negative_ratings, prediction_negativeTag_test)
+mae_negativeTag_test <- mae(negativeTag_test_data$negative_ratings, prediction_negativeTag_test)
+rmse_negativeTag_test<- rmse(negativeTag_test_data$negative_ratings, prediction_negativeTag_test)
+
+# Print the errors
+print(paste("Training Root Mean Squared Error (RMSE) with Linear Regression Model:", rmse_negativeTag_train))
+print(paste("Training Mean Squared Error (MSE) with Linear Regression Model:", mse_negativeTag_train))
+print(paste("Training Mean Absolute Error (MAE) with Linear Regression Model:", mae_negativeTag_train))
+
+print(paste("Testing Root Mean Squared Error (RMSE) with Linear Regression Model:", rmse_negativeTag_test))
+print(paste("Testing Mean Squared Error (MSE) with Linear Regression Model:", mse_negativeTag_test))
+print(paste("Testing Mean Absolute Error (MAE) with Linear Regression Model:", mae_negativeTag_test))
+```
+
+1. **Mean Squared Error (MSE)** measures the average squared difference between the observed actual outcomes and the outcomes predicted by the model. The training MSE is approximately 1.576, and the testing MSE is slightly higher at approximately 1.586. A higher MSE on the testing set compared to the training set could suggest a slight overfitting, although the difference is not very large.
+
+2. **Mean Absolute Error (MAE)** is the average absolute difference between the observed actual outcomes and the predictions. It gives an idea of the magnitude of the errors but does not indicate the direction. The training MAE is approximately 1.049, and the testing MAE is slightly higher at approximately 1.056. As with MSE, the difference between training and testing MAE is not substantial, which is a good indication that the model has generalized reasonably well.
+
+3. **Root Mean Squared Error (RMSE)** is the square root of MSE and measures the average magnitude of the error. It’s more sensitive to outliers than the MAE because it squares the differences before averaging them. The RMSE values for both training and testing data are quite close, 1.255 for training and 1.259 for testing. Similar to the MSE and MAE, the small difference between the training and testing RMSE suggests that the model has not overfit the training data to a significant extent.
+
+**Conclusion**:
+Given that the training and testing errors are quite close to each other across all three metrics, the model appears to have a good fit to the data without significant overfitting. 
+
+#### Result
+
+**Coefficient Plot:** The coefficient plot provided visualizes the estimated coefficients of the top 15 predictors from a linear regression model, ranked by their absolute value. Each point on the plot represents the estimated effect size of a predictor variable, and the horizontal lines indicate the standard errors, giving a sense of the precision of these estimates.
+
+```{r}
+# Prepare the Model Data:
+# Converts the linear regression model into a tidy data frame. This data frame includes a row for each model predictor, with columns for estimates, standard errors, and other statistics.
+tidied_model <- tidy(negativeTag_forward_model)
+
+# Exclude the intercept from the tidied model summary
+tidied_model <- tidied_model %>% filter(term != "(Intercept)")
+
+ # Order coefficients by their absolute values
+tidied_model$absolute_estimate <- abs(tidied_model$estimate)
+top_coefficients <- tidied_model[order(-tidied_model$absolute_estimate), ][1:15, ]
+
+# Plot the top 10 coefficients based on absolute value
+ggplot(top_coefficients, aes(x = reorder(term, absolute_estimate), y = estimate)) +
+  geom_point() +
+  geom_errorbar(aes(ymin = estimate - std.error, ymax = estimate + std.error), width = 0.2) +
+  theme_minimal() +
+  coord_flip() +
+  labs(x = "Predictors", y = "Estimated Coefficients",
+       title = "Top 15 Coefficients of the Linear Regression Model")
+```
+
+1. **Magnitude and Direction**: The position of the point on the x-axis indicates the magnitude and direction of the effect each predictor has on the dependent variable. Points to the right of zero suggest a positive relationship (as the predictor increases, the dependent variable also increases), while points to the left indicate a negative relationship.
+
+2. **Confidence Intervals**: The horizontal lines represent the confidence intervals, usually 95% confidence intervals, for the coefficient estimates. If the line crosses the vertical line at zero, this suggests that the effect of that predictor may not be statistically significant at the chosen confidence level, because the true coefficient could be zero.
+
+3. **Statistical Significance**: The plot suggests that the majority of the variables shown have confidence intervals that do not cross the zero line, indicating that these coefficients are likely to be statistically significant.
+
+4. **Predictor Importance**: The length of the confidence intervals also gives us some insight into the precision of the estimates. Shorter lines mean more precise estimates. 
+
+5. **Influential Features**: The feature 'free_to_play' has the largest coefficient with a relatively narrow confidence interval, suggesting it is a strong and significant predictor of the dependent variable. The 'sandbox' predictor also has a large positive effect but with a wider confidence interval.
+
+6. **Relative Importance**: It appears that 'rts' and 'puzzle' have the least influence among the top 15 features given their coefficients are closest to zero.
+
+7. **Potential Issues**: There are some wide confidence intervals, such as for 'open_world', 'funny', 'zombies', and 'sandbox', which suggest less certainty in the exact value of the coefficient, potentially due to a smaller sample size for those features or high variance.
+
+
+## 6. Which tags are associated with the highest average playtime?
+
+#### Merging Datasets:
+
+**Objective**: To integrate the normalized TagData with the SteamData,
+specifically focusing on game identifiers (appid) and their
+corresponding average playtime. This step combines all relevant
+information into a single dataset, enabling a comprehensive analysis of
+how different tags (from TagData) relate to the average playtime of
+games (from SteamData). It ensures that the analysis can proceed with a
+full picture of the data.
+
+```{r}
+# Create a subset of 'nonzeroPlaytime' that includes 'appid' and 'average_playtime'. This ensures we have the unique identifiers and the associated average playtime for each game.
+playtime_col <- nonzeroPlaytime[, c("appid", "average_playtime"), drop = FALSE]
+
+# Merge the subset of game data with average playtime ('playtime_col') with the tag data ('normalizedTagData'). Use 'appid' as the common key to join these datasets. The parameter 'all.x = TRUE' ensures that all entries from 'playtime_col' are kept in the resulting dataset, even if there is no corresponding entry in 'normalizedTagData'.
+playtimeTag <- merge(playtime_col, normalizedTagData, by = "appid", all.x = TRUE)
+
+# Remove the 'appid' column from the merged dataset 'playtimeTag' as it is no longer needed for the subsequent analysis. We are focusing on the relationship betweenaverage playtime and tags, not on the app identifiers themselves.
+playtimeTag <- select(playtimeTag, -c(appid))
+```
+
+#### Correlation Analysis
+
+**Objective**: Identifies variables that significantly correlate with positive ratings. Aims to streamline the data to include only the variables that have a significant correlation with positive ratings. This helps in identifying the key factors that could be predictive of or associated with higher positive ratings, which is essential for building a predictive model or for focusing on areas of improvement or analysis.
+
+```{r}
+# Compute correlations between 'average_playtime' and each numeric variable in the dataset
+# Skip variables with a standard deviation of zero as they are constant and cannot be correlated
+playtimeTag_correlations <- sapply(colnames(playtimeTag[,sapply(playtimeTag,is.numeric)]), 
+  function(var_name) { if (is.numeric(playtimeTag[[var_name]]) && var_name != 'average_playtime') {
+    # Check if the standard deviation is not zero
+    if (sd(playtimeTag[[var_name]], na.rm = TRUE) != 0) {
+      cor(playtimeTag[[var_name]], playtimeTag$average_playtime, use = "complete.obs", method = "pearson") 
+    } else {
+      NA  # Return NA for variables with a standard deviation of zero
+    }
+  }
+})
+
+# Discard any NAs that may have resulted from the previous step
+playtimeTag_na_columns <- names(playtimeTag_correlations)[is.na(playtimeTag_correlations)]
+playtimeTag_correlations_clean <- playtimeTag_correlations[!is.na(playtimeTag_correlations)]
+
+# Refine the dataset to include only variables with a valid correlation to average playtime
+playtimeTag <- select(playtimeTag, -all_of(playtimeTag_na_columns))
+
+# Convert the list of clean correlations into a numeric vector for further analysis and visualization.
+playtimeTag_correlations_numeric <- unlist(playtimeTag_correlations_clean)
+
+# Determine the lower bound for significant correlations by taking the 80th percentile of the absolute values.
+lower_Corr <- quantile(abs(playtimeTag_correlations_numeric), 0.8)
+
+# Identify columns with correlation below this threshold as they are less relevant for predicting average playtime
+irr_columns <- names(playtimeTag_correlations_numeric)[abs(playtimeTag_correlations_numeric) < lower_Corr]
+
+# Filter out the irrelevant columns from 'playtimeTag' to refine the dataset.
+existing_irr_columns <- intersect(irr_columns, names(playtimeTag))
+
+# Remove Variables that have a lower correlation with dependent variable
+playtimeTag <- select(playtimeTag, -all_of(existing_irr_columns))
+
+# Remove these irrelevant columns from the numeric vector of correlations.
+playtimeTag_correlations_numeric <- playtimeTag_correlations_numeric[!names(playtimeTag_correlations_numeric) %in% irr_columns]
+
+# Create a bar plot to visualize the correlations between the variables and average playtime
+# This plot will display only the variables with significant correlations.
+barplot(playtimeTag_correlations_numeric, las=2, main="Correlation with Shares", col="blue", names.arg = names(playtimeTag_correlations_numeric))
+```
+
+#### Model Preparation and Selection
+
+**Data Partitioning**: The purpose of this code is to partition the dataset into a training set and a testing set. The training set is used to build the model, and the testing set is used to evaluate its performance. This approach helps to assess how well the model is likely to perform on unseen data, thus giving an indication of its generalization ability.
+
+```{r}
+# Set a seed for random number generation to ensure that the results are reproducible
+set.seed(127) # Ensure reproducibility
+
+# Calculate the total number of rows in the 'playtimeTag' dataset
+playtimeTag_data_size <- nrow(playtimeTag)
+
+# Calculate the number of rows that make up 70% of the dataset
+playtimeTag_train_size <- floor(0.7 * playtimeTag_data_size)
+
+# Randomly select row indices for the training set based on the size calculated
+playtimeTag_train_indices <- sample(seq_len(playtimeTag_data_size), size = playtimeTag_train_size)
+
+# Use the selected indices to create the training dataset
+playtimeTag_train_data <- playtimeTag[playtimeTag_train_indices, ]
+
+# Use the remaining indices to create the testing dataset
+playtimeTag_test_data <- playtimeTag[-playtimeTag_train_indices, ]
+```
+
+#### Model Building
+
+**Objective**: Starts with an intercept-only model and progresses
+through forward stepwise regression to select the most significant
+predictors of average playtime. This iterative process helps in building
+a parsimonious model that explains the data well without overfitting.
+
+```{r}
+# Build linear regression models: Starting with an intercept-only model, then using all predictors
+# Forward stepwise regression is used to select significant predictors
+
+# Define the intercept-only model, which includes no predictors.
+playtimeTag_intercept_model <- lm(average_playtime ~ 1, data=playtimeTag_train_data)
+
+# Define the full model with all possible predictors.
+playtimeTag_all_model <- lm(average_playtime ~ ., data=playtimeTag_train_data)
+
+# Conduct forward stepwise regression starting from the intercept-only model and considering all predictors.
+playtimeTag_forward_model <- step(playtimeTag_intercept_model, direction='forward', scope=formula(playtimeTag_all_model), trace=0)
+
+# Output the summary of the final model to view its details, including estimated coefficients, statistical significance, etc.
+summary(playtimeTag_forward_model)
+```
+
+The output is a summary of a linear regression model, which indicates how different gaming-related features predict the `average_playtime`. Let's break down the key parts of this output:
+
+**Residuals**: The summary of residuals shows that there is a range from approximately -5.1 to 5.1, indicating the spread of errors between the actual and predicted values.
+
+**Model Metrics**:
+    - **Residual Standard Error (RSE)**: The RSE of 1.638 indicates the average distance that the observed values fall from the regression line.
+    - **Multiple R-squared**: At 0.1171, this metric tells us that approximately 11.71% of the variability in `average_playtime` is explained by the model.
+    - **Adjusted R-squared**: Adjusted for the number of predictors, it is slightly lower at 0.1093, indicating a small decrease when adjusting for the number of variables in the model.
+    - **F-statistic**: This tests whether at least one predictor variable has a non-zero coefficient. The very small p-value (< 2.2e-16) indicates that we can reject the null hypothesis that all coefficients are zero.
+
+From the coefficients, we can see several variables with strong effects:
+- `multiplayer` has the largest positive effect, suggesting that games with this feature are associated with longer playtimes.
+- `first_person` has a large negative coefficient, suggesting an association with shorter playtimes, which might seem counterintuitive and could warrant further investigation.
+- `free_to_play` also has a significant negative coefficient, which could suggest that such games are played for shorter periods, on average.
+
+The model has several significant predictors, but the overall fit is not very strong, given the low R-squared values. This means that while some of the predictors are statistically significant, there's still a lot of variability in `average_playtime` that isn't explained by the model. It may be useful to investigate other variables or different types of models to better understand the factors that affect average playtime.
+
+#### Multicollinearity Assessment - Variance Inflation Factor (VIF):
+
+**Objective**: VIF assesses multicollinearity by measuring how much the
+variance of an estimated regression coefficient increases if predictors
+are correlated. A VIF value above 5 indicates high multicollinearity,
+suggesting that the predictor may be redundant due to linear
+relationships with other predictors. Examining VIF helps in diagnosing
+potential issues with the model related to multicollinearity.
+
+**Result**: 
+- `singleplayer`, `strategy`, `fps`, `team_based`, `first_person`, `multiplayer`, `free_to_play`, `tactical`, `action`, `pvp`, `co_op`, `competitive`, and `online_co_op` have VIFs substantially greater than 5, indicating high multicollinearity.
+- `multiplayer` has an exceptionally high VIF of 58.90, which is very suggestive of multicollinearity issues.
+- `team_based`, `co_op`, and `competitive` also have very high VIF values (over 30), which is quite problematic.
+
+These high VIF values mean that these variables are highly correlated with other variables in the model, which complicates the interpretation of their coefficients. For instance, the effect of `multiplayer` on average playtime might not be isolated; it could be intertwined with effects from other related variables like `co_op` or `competitive`.
+
+```{r}
+# View Variance Inflation Factor (VIF) for the final model
+vif(playtimeTag_forward_model)
+```
+
+**Extract predictor names and prepare data for VIF calculation**: To extract the names of the predictor variables from the model and prepare the dataset for VIF calculation. We are aiming to select only the predictor variables and the response variable 'average_playtime' for VIF calculation.
+
+```{r}
+# Extract the names of the coefficients from the model, which includes the intercept and predictors.
+variable_names <- names(coefficients(playtimeTag_forward_model))
+# Exclude the intercept from the list of variable names to focus only on predictors.
+predictor_names <- variable_names[-1] # Removes the first element, which is "(Intercept)".
+# Add the response variable 'average_playtime' to the list of predictors for VIF calculation.
+predictor_names <- c(predictor_names, "average_playtime")
+# Select the columns from the training dataset based on the list of predictors plus the response variable.
+playtimeVIF <- select(playtimeTag_train_data, all_of(predictor_names))
+```
+
+#### Recursive function to remove variables with high VIF
+
+**Purpose**: To create a function that recursively removes variables from the dataset if they have high VIF, indicating problematic multicollinearity. The function stops when all VIFs are below the threshold or when there are fewer than two predictors left in the model.
+
+```{r}
+# Define a function to remove variables with a VIF greater than 5 recursively.
+recursive_remove_vif <- function(data) {
+  # Initialize the model formula with 'average_playtime' as the response variable and all other columns as predictors.
+  formula <- as.formula(paste("average_playtime ~ .", collapse = ""))
+  # Fit an initial linear model using the formula and provided data.
+  model <- lm(formula, data = data)
+  # Calculate the initial VIF values for the model's predictors.
+  vif_nums <- vif(model)
+  
+  # Continue the loop as long as there is any VIF value above the threshold of 5.
+  while(any(vif_nums > 5)) {
+    # Identify the variable with the highest VIF.
+    max_vif_var <- names(which.max(vif_nums))
+    # Print out the variable being removed and its VIF value.
+    cat("Removing:", max_vif_var, "with VIF:", max(vif_nums), "\n")
+    # Remove the variable with the highest VIF from the data.
+    data <- select(data, -all_of(max_vif_var))
+    
+    # If the dataset has fewer than three columns (one predictor and the response), stop the loop to avoid underfitting.
+    if (ncol(data) <= 2) {
+      break
+    }
+    
+    # Refit the model with the updated dataset and recalculate the VIF values.
+    model <- lm(formula, data = data)
+    vif_nums <- vif(model)
+  }
+  
+  # Return the modified dataset with reduced multicollinearity.
+  return(data)
+}
+
+# Apply the defined function to the 'playtimeVIF' dataset to remove highly collinear variables.
+playtimeVIF <- recursive_remove_vif(playtimeVIF)
+```
+#### Model Building with Forward Stepwise Regression after Resolve Multicollinearity Issue
+
+**Model Building**: This model for `average_playtime` is being predicted by a set of features that have presumably passed the multicollinearity test since they remain in the model after assessing VIF.
+
+```{r}
+# Build linear regression models: Starting with an intercept-only model, then using all predictors
+# Forward stepwise regression is used to select significant predictors
+
+# Define the intercept-only model, which includes no predictors.
+playtimeTag_intercept_model <- lm(average_playtime ~ 1, data=playtimeVIF)
+
+# Define the full model with all possible predictors.
+playtimeTag_all_model <- lm(average_playtime ~ ., data=playtimeVIF)
+
+# Conduct forward stepwise regression starting from the intercept-only model and considering all predictors.
+playtimeTag_forward_model <- step(playtimeTag_intercept_model, direction='forward', scope=formula(playtimeTag_all_model), trace=0)
+
+# Output the summary of the final model to view its details, including estimated coefficients, statistical significance, etc.
+summary(playtimeTag_forward_model)
+```
+
+The updated output from an R summary of a linear regression model reflects changes made in response to multicollinearity concerns by removing variables with high VIFs. The model now includes a different set of predictors to estimate `average_playtime`. Let's examine the key elements of this updated output:
+
+**Model Fit**:
+- **Residual Standard Error**: Slightly higher than in the previous model, now at 1.65.
+- **Multiple R-squared**: Has decreased to 0.1013, indicating that the model explains about 10.13% of the variability in `average_playtime`.
+- **Adjusted R-squared**: Also decreased to 0.09692, which accounts for the number of predictors in the model.
+- **F-statistic**: Remains significant (p-value < 2.2e-16), meaning the model is statistically significant.
+
+Despite addressing multicollinearity, the R-squared values are relatively low, suggesting that while the predictors included in the model are relevant, they only capture a small portion of the variability in `average_playtime`. It might be worth exploring additional predictors or interactions between variables, or considering non-linear models if the relationships between predictors and playtime are not strictly linear.
+
+#### Check Multicollinearity with VIF
+
+**Result**: All VIF values are below 5, which suggests that
+multicollinearity is not a severe problem for every variables in the
+model.
+
+```{r}
+# View Variance Inflation Factor (VIF) for the final model
+vif(playtimeTag_forward_model)
+```
+
+#### Diagnostic Tests and Model Evaluation - Residual Analysis:
+
+The diagnostic plots provided are common tools used in regression analysis to evaluate the assumptions of the linear model. These include the normality of residuals, homoscedasticity (equal variance of residuals), and the influence of individual data points. Here's an explanation of each plot and what it indicates about the model:
+
+**Normal Q-Q Plot**: This plot is designed to show if the residuals from the linear regression are normally distributed. Points that follow the red line closely indicate that the residuals are normally distributed. In this Q-Q plot, the residuals seem to deviate from the red line in both tails, which suggests that the residuals have heavier tails than the normal distribution. This could mean that there are outliers affecting the regression or that the residuals are not entirely normally distributed.
+
+```{r}
+# Normality of Residuals
+
+# Extract residuals
+playtimeTag_res <- residuals(playtimeTag_forward_model)
+# QQ plot for normality check
+qqnorm(playtimeTag_res)
+# Add reference line to QQ plot
+qqline(playtimeTag_res, col = "red")
+```
+
+**Residuals vs. Fitted Values Plot**: This plot helps to check the homoscedasticity assumption — that the residuals have constant variance at all levels of the explanatory variables. This plot shows a pattern where the residuals spread out as the fitted values increase, which suggests the presence of heteroscedasticity. This implies that the variance of the residuals is not consistent across all levels of fitted values, which can be problematic for regression analysis as it can affect the regression coefficients and significance tests.
+
+```{r}
+# Homoscedasticity
+
+# Plot residuals vs. fitted values for homoscedasticity check
+plot(fitted(playtimeTag_forward_model), playtimeTag_res, xlab = "Fitted Values", ylab = "Residuals", main = "Residuals vs. Fitted Values")
+
+# Add horizontal line at 0
+abline(h = 0, col = "red")
+```
+
+**Leverage Plot**: The leverage plot helps identify influential cases that could have a disproportionate impact on the model's predictions. Points with high leverage can unduly affect the regression line and might need to be investigated further. This plot shows most points with low leverage values, but there are a few points with higher leverage. These points may be outliers or influential points that could potentially skew the regression analysis.
+
+```{r}
+# Plot leverage values to identify influential observations
+plot(hatvalues(playtimeTag_forward_model), main="Leverage Values")
+```
+
+**Performance Metrics**: The model's performance is assessed using three key metrics: Mean Squared Error (MSE), Mean Absolute Error (MAE), and Root Mean Squared Error (RMSE). These metrics are calculated for both the training data and the testing data to understand the model's predictive accuracy and generalization ability.
+
+
+```{r}
+# Making predictions on the training set
+prediction_playtimeTag_train <- predict(playtimeTag_forward_model, newdata = playtimeTag_train_data)
+mse_playtimeTag_train <- mse(playtimeTag_train_data$average_playtime, prediction_playtimeTag_train)
+mae_playtimeTag_train <- mae(playtimeTag_train_data$average_playtime, prediction_playtimeTag_train)
+rmse_playtimeTag_train <- rmse(playtimeTag_train_data$average_playtime, prediction_playtimeTag_train)
+
+# Making predictions on the testing set
+prediction_playtimeTag_test <- predict(playtimeTag_forward_model, newdata = playtimeTag_test_data)
+
+mse_playtimeTag_test <- mse(playtimeTag_test_data$average_playtime, prediction_playtimeTag_test)
+mae_playtimeTag_test <- mae(playtimeTag_test_data$average_playtime, prediction_playtimeTag_test)
+rmse_playtimeTag_test<- rmse(playtimeTag_test_data$average_playtime, prediction_playtimeTag_test)
+
+# Print the errors
+print(paste("Training Root Mean Squared Error (RMSE) with Linear Regression Model:", rmse_playtimeTag_train))
+print(paste("Training Mean Squared Error (MSE) with Linear Regression Model:", mse_playtimeTag_train))
+print(paste("Training Mean Absolute Error (MAE) with Linear Regression Model:", mae_playtimeTag_train))
+
+print(paste("Testing Root Mean Squared Error (RMSE) with Linear Regression Model:", rmse_playtimeTag_test))
+print(paste("Testing Mean Squared Error (MSE) with Linear Regression Model:", mse_playtimeTag_test))
+print(paste("Testing Mean Absolute Error (MAE) with Linear Regression Model:", mae_playtimeTag_test))
+```
+
+1. **Mean Squared Error (MSE)**: This metric measures the average squared difference between the observed actual and the predicted values by the model. It gives an idea of the magnitude of error. The training MSE is approximately 2.707, and the testing MSE is slightly higher at approximately 2.858. The closeness of these values suggests that the model is fairly consistent across both datasets.
+
+2. **Mean Absolute Error (MAE)**: This metric measures the average absolute difference between the observed and predicted values. Unlike MSE, MAE does not penalize large deviations more than small ones, providing a straightforward representation of the average error magnitude. The training MAE is about 1.224, and the testing MAE is 1.240, indicating the model's predictions are on average about 1.23 hours off from the true values.
+
+3. **Root Mean Squared Error (RMSE)**: This is the square root of MSE, which adjusts the scale of the errors to be compatible with the scale of the data. It gives a relatively high weight to large errors. The training RMSE is approximately 1.645, and the testing RMSE is about 1.690. This suggests that the model has a bit more error when predicting new, unseen data, but not by a substantial margin.
+
+**Conclusion**:
+The fact that the training and testing errors are similar for each metric indicates good model generalization without overfitting. 
+
+#### Result
+
+**Coefficient Plot:** The coefficient plot provided visualizes the estimated coefficients of the top 15 predictors from a linear regression model, ranked by their absolute value. Each point on the plot represents the estimated effect size of a predictor variable, and the horizontal lines indicate the standard errors, giving a sense of the precision of these estimates.
+
+```{r}
+# Prepare the Model Data:
+# Converts the linear regression model into a tidy data frame. This data frame includes a row for each model predictor, with columns for estimates, standard errors, and other statistics.
+tidied_model <- tidy(playtimeTag_forward_model)
+
+# Exclude the intercept from the tidied model summary
+tidied_model <- tidied_model %>% filter(term != "(Intercept)")
+
+ # Order coefficients by their absolute values
+tidied_model$absolute_estimate <- abs(tidied_model$estimate)
+top_coefficients <- tidied_model[order(-tidied_model$absolute_estimate), ][1:15, ]
+
+# Plot the top 10 coefficients based on absolute value
+ggplot(top_coefficients, aes(x = reorder(term, absolute_estimate), y = estimate)) +
+  geom_point() +
+  geom_errorbar(aes(ymin = estimate - std.error, ymax = estimate + std.error), width = 0.2) +
+  theme_minimal() +
+  coord_flip() +
+  labs(x = "Predictors", y = "Estimated Coefficients",
+       title = "Top 15 Coefficients of the Linear Regression Model")
+```
+
+1. **Predictor Variables**: The y-axis lists the predictor variables included in the linear regression model.
+
+2. **Estimated Coefficients**: The dots represent the estimated effect size of each predictor variable on the dependent variable (which seems to be `average_playtime` based on previous context).
+
+3. **Confidence Intervals**: The horizontal lines extending from each dot represent the 95% confidence intervals of the estimated coefficients. A shorter line indicates more precision in the estimation of the coefficient.
+
+4. **Significance and Magnitude**:
+   - The absence of confidence intervals crossing the vertical line at zero suggests that all the top 15 predictors are statistically significant and have a non-zero effect on the dependent variable.
+   - The coefficient for `rpg` appears to be the highest among the top predictors, suggesting that being classified as an RPG (Role-Playing Game) has a strong positive association with the `average_playtime`.
+   - Other genres and game features like `simulation`, `tactical`, and `turn_based` also show significant positive associations.
+
+5. **Interpretation of Coefficients**:
+   - Positive coefficients (e.g., for `rpg`, `simulation`) imply that games with these features are expected to have higher `average_playtime`.
+   - The size of the coefficient indicates the strength of the association. For example, `rpg` has a larger coefficient than `classic`, suggesting a stronger relationship with `average_playtime`.
+
+6. **Variability in Estimates**:
+   - Predictors with wider confidence intervals (e.g., `tactical`, `turn_based`) indicate less certainty in the precise effect of that predictor on the dependent variable, which could be due to a smaller number of observations for those categories or greater variability in the data for those predictors.
